@@ -26,6 +26,13 @@ pub struct FileNode {
     pub metadata: String,
 }
 
+pub struct DirectoryNode {
+    pub id: String,
+    pub node_type: String,
+    pub name: String,
+    pub metadata: String,
+}
+
 pub struct EdgeRecord {
     pub source: String,
     pub target: String,
@@ -43,6 +50,13 @@ struct AuthorOwnershipScore {
     author: String,
     commit_count: i64,
     score: f64,
+}
+
+struct FileHotspotMetric {
+    file_id: String,
+    file_name: String,
+    churn_score: i64,
+    level: String,
 }
 
 impl CommitNode {
@@ -97,6 +111,17 @@ impl FileNode {
     }
 }
 
+impl DirectoryNode {
+    pub fn from_path(path: &str) -> Self {
+        Self {
+            id: format!("directory_{}", sanitize_id(path)),
+            node_type: "Directory".to_string(),
+            name: path.to_string(),
+            metadata: json!({ "path": path }).to_string(),
+        }
+    }
+}
+
 /// SQLite repository for graph persistence.
 pub struct CommitRepository {
     conn: Connection,
@@ -121,6 +146,10 @@ impl CommitRepository {
     }
 
     pub fn upsert_file_node(&self, node: &FileNode) -> rusqlite::Result<bool> {
+        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+    }
+
+    pub fn upsert_directory_node(&self, node: &DirectoryNode) -> rusqlite::Result<bool> {
         self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
     }
 
@@ -211,6 +240,59 @@ impl CommitRepository {
             .to_string();
 
             let _ = self.upsert_metadata("File", &file.id, "ownership", &ownership_json)?;
+        }
+
+        Ok(files.len())
+    }
+
+    pub fn compute_and_store_file_hotspots(&self) -> rusqlite::Result<usize> {
+        let files = self.get_all_files()?;
+        if files.is_empty() {
+            return Ok(0);
+        }
+
+        let mut churn_scores = Vec::<i64>::new();
+        let mut raw_rows = Vec::<(String, String, i64)>::new();
+        for file in &files {
+            let churn_score = self.get_total_commits_for_file(&file.id)?;
+            churn_scores.push(churn_score);
+            raw_rows.push((file.id.clone(), file.name.clone(), churn_score));
+        }
+
+        churn_scores.sort();
+        let len = churn_scores.len();
+        let low_threshold = churn_scores[(len.saturating_sub(1) * 33) / 100];
+        let high_threshold = churn_scores[(len.saturating_sub(1) * 66) / 100];
+
+        let mut metrics = Vec::<FileHotspotMetric>::new();
+        for (file_id, file_name, churn_score) in raw_rows {
+            let level = if churn_score >= high_threshold {
+                "High"
+            } else if churn_score >= low_threshold {
+                "Medium"
+            } else {
+                "Low"
+            }
+            .to_string();
+
+            metrics.push(FileHotspotMetric {
+                file_id,
+                file_name,
+                churn_score,
+                level,
+            });
+        }
+
+        for metric in metrics {
+            let value = json!({
+                "file_id": metric.file_id,
+                "file": metric.file_name,
+                "churn_score": metric.churn_score,
+                "hotspot": metric.level
+            })
+            .to_string();
+
+            let _ = self.upsert_metadata("File", &metric.file_id, "hotspot", &value)?;
         }
 
         Ok(files.len())
@@ -360,9 +442,12 @@ pub struct IngestionReport {
     pub commit_nodes_inserted: usize,
     pub author_nodes_inserted: usize,
     pub file_nodes_inserted: usize,
+    pub directory_nodes_inserted: usize,
     pub authored_by_edges_inserted: usize,
     pub modifies_edges_inserted: usize,
+    pub contains_edges_inserted: usize,
     pub ownership_files_computed: usize,
+    pub hotspot_files_computed: usize,
     pub duplicates_skipped: usize,
     pub db_path: PathBuf,
 }
@@ -387,8 +472,10 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     let mut commit_nodes_inserted = 0usize;
     let mut author_nodes_inserted = 0usize;
     let mut file_nodes_inserted = 0usize;
+    let mut directory_nodes_inserted = 0usize;
     let mut authored_by_edges_inserted = 0usize;
     let mut modifies_edges_inserted = 0usize;
+    let mut contains_edges_inserted = 0usize;
 
     for oid_result in revwalk {
         let oid = oid_result?;
@@ -424,6 +511,18 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                 file_nodes_inserted += 1;
             }
 
+            let (directory_nodes, contains_edges) = build_directory_hierarchy(&file_path, &file_node.id);
+            for directory_node in directory_nodes {
+                if repository.upsert_directory_node(&directory_node)? {
+                    directory_nodes_inserted += 1;
+                }
+            }
+            for contains_edge in contains_edges {
+                if repository.upsert_edge(&contains_edge)? {
+                    contains_edges_inserted += 1;
+                }
+            }
+
             let modifies_edge = EdgeRecord {
                 source: commit_node.id.clone(),
                 target: file_node.id,
@@ -438,13 +537,22 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     }
 
     let ownership_files_computed = repository.compute_and_store_file_ownership()?;
+    let hotspot_files_computed = repository.compute_and_store_file_hotspots()?;
 
-    let total_possible = scanned + scanned + authored_by_edges_inserted + file_nodes_inserted + modifies_edges_inserted;
+    let total_possible = scanned
+        + scanned
+        + file_nodes_inserted
+        + directory_nodes_inserted
+        + authored_by_edges_inserted
+        + modifies_edges_inserted
+        + contains_edges_inserted;
     let inserted_total = commit_nodes_inserted
         + author_nodes_inserted
         + file_nodes_inserted
+        + directory_nodes_inserted
         + authored_by_edges_inserted
-        + modifies_edges_inserted;
+        + modifies_edges_inserted
+        + contains_edges_inserted;
 
     let duplicates_skipped = total_possible.saturating_sub(inserted_total);
 
@@ -453,9 +561,12 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         commit_nodes_inserted,
         author_nodes_inserted,
         file_nodes_inserted,
+        directory_nodes_inserted,
         authored_by_edges_inserted,
         modifies_edges_inserted,
+        contains_edges_inserted,
         ownership_files_computed,
+        hotspot_files_computed,
         duplicates_skipped,
         db_path,
     })
@@ -513,6 +624,53 @@ fn sanitize_id(input: &str) -> String {
         .collect()
 }
 
+fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<DirectoryNode>, Vec<EdgeRecord>) {
+    let normalized = file_path.replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+
+    if parts.len() <= 1 {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut directories = Vec::<DirectoryNode>::new();
+    let mut contains_edges = Vec::<EdgeRecord>::new();
+    let mut parent_dir_id: Option<String> = None;
+    let mut prefix = String::new();
+
+    for part in &parts[0..parts.len() - 1] {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+
+        let directory_node = DirectoryNode::from_path(&prefix);
+        let current_dir_id = directory_node.id.clone();
+        directories.push(directory_node);
+
+        if let Some(parent_id) = &parent_dir_id {
+            contains_edges.push(EdgeRecord {
+                source: parent_id.clone(),
+                target: current_dir_id.clone(),
+                relation: "CONTAINS".to_string(),
+                metadata: Some(json!({ "child_type": "Directory" }).to_string()),
+            });
+        }
+
+        parent_dir_id = Some(current_dir_id);
+    }
+
+    if let Some(last_dir_id) = parent_dir_id {
+        contains_edges.push(EdgeRecord {
+            source: last_dir_id,
+            target: file_node_id.to_string(),
+            relation: "CONTAINS".to_string(),
+            metadata: Some(json!({ "child_type": "File" }).to_string()),
+        });
+    }
+
+    (directories, contains_edges)
+}
+
 fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
     if let Some(workdir) = repo.workdir() {
         return workdir.join("graph.db");
@@ -558,6 +716,13 @@ mod tests {
         let file_count: i64 = db
             .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'File'", [], |row| row.get(0))
             .expect("file count should succeed");
+        let directory_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Directory'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("directory count should succeed");
         let authored_by_count: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM edges WHERE relation = 'AUTHORED_BY'",
@@ -572,6 +737,13 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("modifies count should succeed");
+        let contains_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'CONTAINS'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("contains count should succeed");
         let ownership_count: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM metadata WHERE entity_type = 'File' AND key = 'ownership'",
@@ -579,15 +751,26 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("ownership count should succeed");
+        let hotspot_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM metadata WHERE entity_type = 'File' AND key = 'hotspot'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("hotspot count should succeed");
 
         assert_eq!(report.scanned, 3);
         assert_eq!(commit_count, 3);
         assert_eq!(author_count, 1);
         assert!(file_count >= 1);
+        assert!(directory_count >= 1);
         assert_eq!(authored_by_count, 3);
         assert!(modifies_count >= 3);
+        assert!(contains_count >= 1);
         assert_eq!(ownership_count, file_count);
+        assert_eq!(hotspot_count, file_count);
         assert_eq!(report.ownership_files_computed as i64, file_count);
+        assert_eq!(report.hotspot_files_computed as i64, file_count);
     }
 
     #[test]

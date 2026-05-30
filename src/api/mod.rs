@@ -51,6 +51,8 @@ pub struct FileInsights {
     pub commits: Vec<NodeRecord>,
     pub top_contributors: Vec<FileOwnerScore>,
     pub top_owner: Option<FileOwnerScore>,
+    pub churn_score: Option<i64>,
+    pub hotspot: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -58,6 +60,13 @@ pub struct FileOwnerScore {
     pub author: String,
     pub score: f64,
     pub commit_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct FileHotspotResponse {
+    pub file_id: String,
+    pub churn_score: i64,
+    pub hotspot: String,
 }
 
 #[derive(Serialize)]
@@ -93,6 +102,7 @@ pub fn router(db_path: PathBuf) -> Router {
         .route("/query/commits-by-author/{id}", get(get_commits_by_author))
         .route("/query/author-ownership/{id}", get(get_author_ownership))
         .route("/query/top-owner/{id}", get(get_top_owner))
+        .route("/query/file-hotspots", get(get_file_hotspots))
         .route("/health", get(health))
         .layer(cors)
         .with_state(GraphApiState { db_path })
@@ -469,6 +479,53 @@ async fn get_top_owner(
     Ok(Json(get_top_owner_from_metadata(&conn, &id)?))
 }
 
+async fn get_file_hotspots(
+    State(state): State<GraphApiState>,
+) -> Result<Json<Vec<FileHotspotResponse>>, (StatusCode, String)> {
+    let conn = open_connection(&state.db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_id, value
+             FROM metadata
+             WHERE entity_type = 'File' AND key = 'hotspot'",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let file_id: String = row.get(0)?;
+            let raw: String = row.get(1)?;
+            Ok((file_id, raw))
+        })
+        .map_err(internal_db_error)?;
+
+    let mut output = Vec::new();
+    for row in rows {
+        let (file_id, raw) = row.map_err(internal_db_error)?;
+        let parsed: Value = serde_json::from_str(&raw).map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid hotspot metadata: {}", err),
+            )
+        })?;
+
+        output.push(FileHotspotResponse {
+            file_id,
+            churn_score: parsed
+                .get("churn_score")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            hotspot: parsed
+                .get("hotspot")
+                .and_then(Value::as_str)
+                .unwrap_or("Low")
+                .to_string(),
+        });
+    }
+
+    Ok(Json(output))
+}
+
 fn get_author_ownership_from_conn(
     conn: &Connection,
     author_id: &str,
@@ -540,6 +597,7 @@ async fn get_node_insights(
         let ownership_scores = get_ownership_scores_from_metadata(&conn, &node.id)?
             .unwrap_or_else(|| get_author_ownership_by_file(&conn, &node.id).unwrap_or_default());
         let top_owner = ownership_scores.first().cloned();
+        let hotspot = get_hotspot_for_file(&conn, &node.id)?;
 
         return Ok(Json(NodeInsightsResponse {
             node,
@@ -548,6 +606,8 @@ async fn get_node_insights(
                 commits,
                 top_contributors: ownership_scores,
                 top_owner,
+                churn_score: hotspot.as_ref().map(|item| item.churn_score),
+                hotspot: hotspot.map(|item| item.hotspot),
             }),
             author_insights: None,
         }));
@@ -756,6 +816,44 @@ fn get_top_owner_from_metadata(
 ) -> Result<Option<FileOwnerScore>, (StatusCode, String)> {
     let ownership = get_ownership_scores_from_metadata(conn, file_id)?;
     Ok(ownership.and_then(|owners| owners.into_iter().next()))
+}
+
+fn get_hotspot_for_file(
+    conn: &Connection,
+    file_id: &str,
+) -> Result<Option<FileHotspotResponse>, (StatusCode, String)> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE entity_type = 'File' AND entity_id = ?1 AND key = 'hotspot'",
+            params![file_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal_db_error)?;
+
+    let Some(raw_value) = raw else {
+        return Ok(None);
+    };
+
+    let parsed: Value = serde_json::from_str(&raw_value).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Invalid hotspot metadata: {}", err),
+        )
+    })?;
+
+    Ok(Some(FileHotspotResponse {
+        file_id: file_id.to_string(),
+        churn_score: parsed
+            .get("churn_score")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        hotspot: parsed
+            .get("hotspot")
+            .and_then(Value::as_str)
+            .unwrap_or("Low")
+            .to_string(),
+    }))
 }
 
 fn internal_db_error(err: rusqlite::Error) -> (StatusCode, String) {

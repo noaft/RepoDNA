@@ -24,9 +24,12 @@ fn main() {
                 println!("Commit nodes inserted: {}", report.commit_nodes_inserted);
                 println!("Author nodes inserted: {}", report.author_nodes_inserted);
                 println!("File nodes inserted: {}", report.file_nodes_inserted);
+                println!("Directory nodes inserted: {}", report.directory_nodes_inserted);
                 println!("AUTHORED_BY edges inserted: {}", report.authored_by_edges_inserted);
                 println!("MODIFIES edges inserted: {}", report.modifies_edges_inserted);
+                println!("CONTAINS edges inserted: {}", report.contains_edges_inserted);
                 println!("Ownership metadata computed for files: {}", report.ownership_files_computed);
+                println!("Hotspot metadata computed for files: {}", report.hotspot_files_computed);
                 println!("Duplicates skipped: {}", report.duplicates_skipped);
             }
             Err(err) => {
