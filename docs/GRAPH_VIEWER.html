@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RepoDNA Graph Viewer 2D</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0d1118;
+      --bg-soft: #111827;
+      --panel: #151d2a;
+      --panel-2: #1a2435;
+      --line: #28344a;
+      --line-soft: #33415b;
+      --ink: #eaf1ff;
+      --muted: #9babc8;
+      --accent: #26d39a;
+      --accent-2: #ffb84d;
+      --good: #6ee7b7;
+      --danger: #fca5a5;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at 8% 0%, rgba(38, 211, 154, 0.16), transparent 30%),
+                  radial-gradient(circle at 100% 0%, rgba(255, 184, 77, 0.12), transparent 25%),
+                  radial-gradient(circle at 50% 100%, rgba(71, 85, 105, 0.18), transparent 45%),
+                  var(--bg);
+      min-height: 100vh;
+    }
+
+    .wrap { width: min(1220px, 94vw); margin: 26px auto 42px; }
+
+    .top {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 14px;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .hero-copy {
+      display: grid;
+      gap: 6px;
+    }
+
+    .eyebrow {
+      margin: 0;
+      color: var(--accent);
+      font-size: 0.74rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.55rem, 4vw, 2.4rem);
+      line-height: 1.1;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      align-items: center;
+      justify-content: flex-end;
+      background: linear-gradient(180deg, rgba(21, 29, 42, 0.9), rgba(14, 20, 31, 0.85));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 10px 11px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+    }
+
+    .controls input {
+      width: min(330px, 48vw);
+      background: #0c131f;
+      color: var(--ink);
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      padding: 9px 11px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.88rem;
+    }
+
+    .btn {
+      border: 1px solid var(--line-soft);
+      background: #1a2434;
+      color: var(--ink);
+      border-radius: 10px;
+      padding: 8px 13px;
+      cursor: pointer;
+      font-weight: 600;
+      transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      border-color: #4e607f;
+    }
+
+    .btn.active {
+      border-color: #33d9a2;
+      background: #13392e;
+      color: #d6ffef;
+    }
+
+    .btn.primary {
+      border-color: #37dca6;
+      background: linear-gradient(180deg, #1b6f56, #165844);
+      color: #ecfff8;
+    }
+
+    .status {
+      margin: 6px 0 14px;
+      color: var(--muted);
+      font-size: 0.95rem;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: rgba(19, 27, 40, 0.65);
+    }
+
+    .board {
+      display: grid;
+      grid-template-columns: 1fr 330px;
+      gap: 13px;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, var(--panel), #131a28);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      overflow: hidden;
+      min-height: 70vh;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.24);
+    }
+
+    #graph2d {
+      width: 100%;
+      height: 70vh;
+    }
+
+    .side {
+      padding: 14px;
+      font-size: 0.94rem;
+      line-height: 1.55;
+    }
+
+    .side h2 {
+      margin: 0 0 12px;
+      font-size: 1.12rem;
+    }
+
+    .legend {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .chip {
+      border: 1px solid var(--line-soft);
+      background: #121b2a;
+      color: #d8e5ff;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      padding: 4px 9px;
+    }
+
+    .kpi {
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 8px;
+      background: #141d2b;
+    }
+
+    .kpi strong {
+      color: #d7e6ff;
+    }
+
+    .mono {
+      font-family: "IBM Plex Mono", monospace;
+      color: #c8d2ea;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+      font-size: 0.84rem;
+      line-height: 1.55;
+      border: 1px dashed var(--line-soft);
+      border-radius: 10px;
+      background: #101826;
+      padding: 10px;
+      min-height: 120px;
+    }
+
+    @media (max-width: 980px) {
+      .board { grid-template-columns: 1fr; }
+      .panel { min-height: 58vh; }
+      #graph2d { height: 58vh; }
+      .top { grid-template-columns: 1fr; }
+      .controls { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="top">
+      <div class="hero-copy">
+        <p class="eyebrow">Repository Intelligence</p>
+        <h1>RepoDNA Graph Viewer (2D)</h1>
+        <p class="subtitle">Explore commits and relationships with a cleaner layout focused on readability.</p>
+      </div>
+      <div class="controls">
+        <input id="apiBase" value="http://127.0.0.1:3000" aria-label="API base URL" />
+        <input id="nodeSearch" placeholder="Search node by name or id" aria-label="Node search" />
+        <button class="btn" id="searchBtn">Search</button>
+        <button class="btn primary" id="loadBtn">Load Graph</button>
+        <button class="btn active" id="mode2d">2D</button>
+      </div>
+    </div>
+
+    <p class="status" id="status">Ready. Start API with: cargo run -- serve-graph . 127.0.0.1:3000</p>
+
+    <section class="board">
+      <div class="panel">
+        <div id="graph2d"></div>
+      </div>
+      <aside class="panel side">
+        <h2>Selection</h2>
+        <div class="legend">
+          <span class="chip">Commit</span>
+          <span class="chip">2D: readable labels</span>
+        </div>
+        <div class="kpi"><strong>Nodes:</strong> <span id="nodeCount">0</span></div>
+        <div class="kpi"><strong>Edges:</strong> <span id="edgeCount">0</span></div>
+        <div class="kpi"><strong>Selected:</strong> <span id="selectedLabel">None</span></div>
+        <p class="mono" id="selectedMeta">Click a node to inspect metadata.</p>
+      </aside>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script>
+    const state = {
+      cy: null,
+      nodes: [],
+      edges: []
+    };
+
+    const statusEl = document.getElementById("status");
+    const nodeCountEl = document.getElementById("nodeCount");
+    const edgeCountEl = document.getElementById("edgeCount");
+    const selectedLabelEl = document.getElementById("selectedLabel");
+    const selectedMetaEl = document.getElementById("selectedMeta");
+    const searchInputEl = document.getElementById("nodeSearch");
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+    }
+
+    function getApiBase() {
+      return document.getElementById("apiBase").value.trim().replace(/\/$/, "");
+    }
+
+    function shortenLabel(value, maxLength = 30) {
+      if (!value) {
+        return "Unnamed";
+      }
+      return value.length > maxLength ? value.slice(0, maxLength - 1) + "…" : value;
+    }
+
+    function formatMetadata(raw) {
+      if (!raw) {
+        return "No metadata";
+      }
+      try {
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return JSON.stringify(parsed, null, 2);
+      } catch (_err) {
+        return String(raw);
+      }
+    }
+
+    function getNodeColor(type) {
+      const normalized = String(type || "").toLowerCase();
+      if (normalized === "commit") {
+        return "#26d39a";
+      }
+      if (normalized.includes("file")) {
+        return "#7dd3fc";
+      }
+      if (normalized.includes("function")) {
+        return "#f9a8d4";
+      }
+      return "#c4b5fd";
+    }
+
+    function center2dGraph() {
+      if (!state.cy) {
+        return;
+      }
+
+      state.cy.resize();
+      state.cy.fit(undefined, 40);
+      state.cy.center();
+    }
+
+    function normalizeGraph(nodes, edges) {
+      return {
+        nodes: nodes.map((n) => ({
+          id: n.id,
+          label: shortenLabel(n.name || n.id, 34),
+          fullLabel: n.name || n.id,
+          type: n.type || "Unknown",
+          metadata: n.metadata || null
+        })),
+        links: edges.map((e) => ({ id: String(e.id), source: e.source, target: e.target, label: e.relation || "REL" }))
+      };
+    }
+
+    async function loadGraph() {
+      try {
+        setStatus("Loading graph from API...");
+        const base = getApiBase();
+
+        const [nodesRes, edgesRes] = await Promise.all([
+          fetch(base + "/nodes"),
+          fetch(base + "/edges")
+        ]);
+
+        if (!nodesRes.ok || !edgesRes.ok) {
+          throw new Error("API request failed. Check server and URL.");
+        }
+
+        const nodes = await nodesRes.json();
+        const edges = await edgesRes.json();
+        state.nodes = nodes;
+        state.edges = edges;
+
+        nodeCountEl.textContent = String(nodes.length);
+        edgeCountEl.textContent = String(edges.length);
+
+        render2d(nodes, edges);
+        setStatus("Loaded graph successfully.");
+      } catch (err) {
+        setStatus("Failed to load graph: " + err.message);
+      }
+    }
+
+    async function loadNodeInsights(nodeId) {
+      try {
+        const base = getApiBase();
+        const response = await fetch(`${base}/node/${encodeURIComponent(nodeId)}/insights`);
+        if (!response.ok) {
+          throw new Error("insights request failed");
+        }
+
+        const insights = await response.json();
+        const lines = [];
+        lines.push(`ID: ${insights.node.id}`);
+        lines.push(`Type: ${insights.node.type}`);
+        lines.push(`Name: ${insights.node.name}`);
+
+        if (insights.file_insights) {
+          lines.push("");
+          lines.push(`Commits touched: ${insights.file_insights.commit_count}`);
+          if (insights.file_insights.top_owner) {
+            const top = insights.file_insights.top_owner;
+            lines.push(`Top owner: ${top.author} (${(top.score * 100).toFixed(2)}%)`);
+          }
+          if (insights.file_insights.top_contributors.length > 0) {
+            lines.push("Ownership:");
+            insights.file_insights.top_contributors.slice(0, 5).forEach((entry) => {
+              lines.push(`- ${entry.author}: ${(entry.score * 100).toFixed(2)}% (${entry.commit_count} commits)`);
+            });
+          }
+        }
+
+        if (insights.author_insights) {
+          lines.push("");
+          lines.push(`Authored commits: ${insights.author_insights.commit_count}`);
+          lines.push(`Modified files: ${insights.author_insights.modified_files_count}`);
+          if (insights.author_insights.ownership.length > 0) {
+            lines.push("Ownership:");
+            insights.author_insights.ownership.slice(0, 5).forEach((entry) => {
+              lines.push(`- ${entry.file_name} (${entry.commit_count})`);
+            });
+          }
+        }
+
+        lines.push("");
+        lines.push("Metadata:");
+        lines.push(formatMetadata(insights.node.metadata));
+        selectedMetaEl.textContent = lines.join("\n");
+      } catch (_err) {
+        selectedMetaEl.textContent = "Failed to load node insights.";
+      }
+    }
+
+    async function runSearch() {
+      const query = searchInputEl.value.trim();
+      if (!query) {
+        setStatus("Please enter a node name or id to search.");
+        return;
+      }
+
+      try {
+        const base = getApiBase();
+        const response = await fetch(`${base}/search/nodes?q=${encodeURIComponent(query)}`);
+        if (!response.ok) {
+          throw new Error("search request failed");
+        }
+        const results = await response.json();
+
+        if (!Array.isArray(results) || results.length === 0) {
+          setStatus("No node found for this search term.");
+          return;
+        }
+
+        const match = results[0];
+        selectedLabelEl.textContent = `${match.name} (${match.type})`;
+        await loadNodeInsights(match.id);
+
+        if (state.cy) {
+          const cyNode = state.cy.getElementById(match.id);
+          if (cyNode && cyNode.length > 0) {
+            state.cy.animate({
+              center: { eles: cyNode },
+              zoom: 1.2,
+              duration: 350
+            });
+          }
+        }
+
+        setStatus(`Found node: ${match.name}`);
+      } catch (err) {
+        setStatus("Search failed: " + err.message);
+      }
+    }
+
+    function render2d(nodes, edges) {
+      if (state.cy) {
+        state.cy.destroy();
+      }
+
+      const elements = [
+        ...nodes.map((n) => ({
+          data: {
+            id: n.id,
+            label: shortenLabel(n.name || n.id),
+            fullLabel: n.name || n.id,
+            type: n.type || "Unknown",
+            metadata: n.metadata || ""
+          }
+        })),
+        ...edges.map((e) => ({ data: { id: String(e.id), source: e.source, target: e.target, label: e.relation || "REL" } }))
+      ];
+
+      state.cy = cytoscape({
+        container: document.getElementById("graph2d"),
+        elements,
+        layout: { name: "cose", animate: true, fit: true, nodeRepulsion: 9800, idealEdgeLength: 160, gravity: 0.55 },
+        style: [
+          {
+            selector: "node",
+            style: {
+              "background-color": "#26d39a",
+              "label": "data(label)",
+              "color": "#f0f6ff",
+              "font-size": "11px",
+              "font-weight": "600",
+              "text-wrap": "wrap",
+              "text-max-width": "150px",
+              "text-valign": "bottom",
+              "text-halign": "center"
+            }
+          },
+          {
+            selector: "edge",
+            style: {
+              "curve-style": "bezier",
+              "target-arrow-shape": "triangle",
+              "width": 1.6,
+              "line-color": "#6e82a9",
+              "target-arrow-color": "#6e82a9",
+              "opacity": 0.8
+            }
+          }
+        ]
+      });
+
+      state.cy.nodes().forEach((node) => {
+        node.style("background-color", getNodeColor(node.data("type")));
+      });
+
+      state.cy.on("tap", "node", (event) => {
+        const node = event.target.data();
+        selectedLabelEl.textContent = node.fullLabel + " (" + node.type + ")";
+        loadNodeInsights(node.id);
+      });
+
+      state.cy.once("layoutstop", () => {
+        center2dGraph();
+      });
+
+      center2dGraph();
+    }
+
+    document.getElementById("loadBtn").addEventListener("click", loadGraph);
+    document.getElementById("searchBtn").addEventListener("click", runSearch);
+    document.getElementById("mode2d").addEventListener("click", center2dGraph);
+    searchInputEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        runSearch();
+      }
+    });
+
+    window.addEventListener("resize", center2dGraph);
+  </script>
+</body>
+</html>

@@ -38,7 +38,7 @@ pub fn scan_git_history(repo_path: &str) -> Result<(), git2::Error> {
 /// - Following lines: one formatted entry per commit.
 pub fn collect_commit_lines(repo_path: &str) -> Result<Vec<String>, git2::Error> {
     let repo = open_repository(repo_path)?;
-    let mut revwalk = create_revwalk(&repo)?;
+    let revwalk = create_revwalk(&repo)?;
     let mut lines = Vec::new();
 
     lines.push(format!("Scanning git history: {}", repo.path().display()));
