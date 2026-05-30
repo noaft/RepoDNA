@@ -208,6 +208,23 @@
       min-height: 120px;
     }
 
+    .hover-tip {
+      position: fixed;
+      z-index: 1000;
+      pointer-events: none;
+      display: none;
+      max-width: 420px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: rgba(11, 18, 29, 0.96);
+      color: #e5edff;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      padding: 7px 9px;
+      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.36);
+    }
+
     @media (max-width: 980px) {
       .board { grid-template-columns: 1fr; }
       .panel { min-height: 58vh; }
@@ -253,6 +270,7 @@
       </aside>
     </section>
   </main>
+  <div id="hoverTip" class="hover-tip"></div>
 
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
   <script>
@@ -268,6 +286,7 @@
     const selectedLabelEl = document.getElementById("selectedLabel");
     const selectedMetaEl = document.getElementById("selectedMeta");
     const searchInputEl = document.getElementById("nodeSearch");
+    const hoverTipEl = document.getElementById("hoverTip");
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -277,11 +296,65 @@
       return document.getElementById("apiBase").value.trim().replace(/\/$/, "");
     }
 
-    function shortenLabel(value, maxLength = 30) {
+    function shortenLabel(value, maxLength = 20) {
       if (!value) {
         return "Unnamed";
       }
       return value.length > maxLength ? value.slice(0, maxLength - 1) + "…" : value;
+    }
+
+    function basename(pathValue) {
+      const normalized = String(pathValue || "").replace(/\\/g, "/");
+      const parts = normalized.split("/");
+      return parts[parts.length - 1] || normalized;
+    }
+
+    function getDisplayLabel(node) {
+      const type = String(node.type || "").toLowerCase();
+      const raw = node.name || node.id;
+      const baseValue = type === "file" ? basename(raw) : raw;
+      return shortenLabel(baseValue, 20);
+    }
+
+    function getHoverText(nodeData) {
+      const type = String(nodeData.type || "").toLowerCase();
+      if (type === "file") {
+        return nodeData.fullLabel || nodeData.label || nodeData.id;
+      }
+      return nodeData.fullLabel || nodeData.label || nodeData.id;
+    }
+
+    function placeTooltip(pageX, pageY) {
+      hoverTipEl.style.left = `${pageX + 14}px`;
+      hoverTipEl.style.top = `${pageY + 14}px`;
+    }
+
+    function showTooltip(text, pageX, pageY) {
+      hoverTipEl.textContent = text;
+      placeTooltip(pageX, pageY);
+      hoverTipEl.style.display = "block";
+    }
+
+    function hideTooltip() {
+      hoverTipEl.style.display = "none";
+    }
+
+    function updateLabelScale() {
+      if (!state.cy) {
+        return;
+      }
+
+      const zoom = state.cy.zoom();
+      const fontSize = Math.max(7, Math.min(13, 8 + zoom * 2.2));
+      const maxWidth = Math.max(80, Math.min(180, 100 + zoom * 35));
+      const textOpacity = zoom < 0.55 ? 0 : zoom < 0.75 ? 0.5 : 1;
+
+      state.cy.style()
+        .selector("node")
+        .style("font-size", `${fontSize}px`)
+        .style("text-max-width", `${Math.round(maxWidth)}px`)
+        .style("text-opacity", textOpacity)
+        .update();
     }
 
     function formatMetadata(raw) {
@@ -324,7 +397,7 @@
       return {
         nodes: nodes.map((n) => ({
           id: n.id,
-          label: shortenLabel(n.name || n.id, 34),
+          label: getDisplayLabel(n),
           fullLabel: n.name || n.id,
           type: n.type || "Unknown",
           metadata: n.metadata || null
@@ -458,11 +531,13 @@
         state.cy.destroy();
       }
 
+      const denseGraph = nodes.length >= 250;
+
       const elements = [
         ...nodes.map((n) => ({
           data: {
             id: n.id,
-            label: shortenLabel(n.name || n.id),
+            label: getDisplayLabel(n),
             fullLabel: n.name || n.id,
             type: n.type || "Unknown",
             metadata: n.metadata || ""
@@ -474,7 +549,14 @@
       state.cy = cytoscape({
         container: document.getElementById("graph2d"),
         elements,
-        layout: { name: "cose", animate: true, fit: true, nodeRepulsion: 9800, idealEdgeLength: 160, gravity: 0.55 },
+        layout: {
+          name: "cose",
+          animate: !denseGraph,
+          fit: true,
+          nodeRepulsion: denseGraph ? 7600 : 9800,
+          idealEdgeLength: denseGraph ? 120 : 160,
+          gravity: denseGraph ? 0.45 : 0.55
+        },
         style: [
           {
             selector: "node",
@@ -514,11 +596,32 @@
         loadNodeInsights(node.id);
       });
 
+      state.cy.on("mouseover", "node", (event) => {
+        const nodeData = event.target.data();
+        const oe = event.originalEvent;
+        showTooltip(getHoverText(nodeData), oe.pageX, oe.pageY);
+      });
+
+      state.cy.on("mousemove", "node", (event) => {
+        const oe = event.originalEvent;
+        placeTooltip(oe.pageX, oe.pageY);
+      });
+
+      state.cy.on("mouseout", "node", () => {
+        hideTooltip();
+      });
+
+      state.cy.on("zoom", () => {
+        updateLabelScale();
+      });
+
       state.cy.once("layoutstop", () => {
         center2dGraph();
+        updateLabelScale();
       });
 
       center2dGraph();
+      updateLabelScale();
     }
 
     document.getElementById("loadBtn").addEventListener("click", loadGraph);
@@ -531,6 +634,7 @@
     });
 
     window.addEventListener("resize", center2dGraph);
+    window.addEventListener("scroll", hideTooltip);
   </script>
 </body>
 </html>
