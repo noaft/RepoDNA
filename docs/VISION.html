@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RepoDNA Vision</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Fraunces:opsz,wght@9..144,600;9..144,700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #f4f7f2;
+      --panel: #ffffff;
+      --ink: #13221d;
+      --muted: #4c5f57;
+      --accent: #0f766e;
+      --accent-2: #f59e0b;
+      --line: #d4ddd6;
+      --shadow: 0 16px 40px rgba(19, 34, 29, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 10%, rgba(15, 118, 110, 0.14), transparent 38%),
+        radial-gradient(circle at 90% 0%, rgba(245, 158, 11, 0.17), transparent 32%),
+        linear-gradient(160deg, #f6faf3 0%, #eef2fb 100%);
+      min-height: 100vh;
+    }
+
+    .wrap {
+      width: min(1000px, 92vw);
+      margin: 48px auto 72px;
+    }
+
+    .hero {
+      background: rgba(255, 255, 255, 0.88);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 40px 34px;
+      backdrop-filter: blur(4px);
+      animation: fadeUp 550ms ease both;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--accent);
+      font-weight: 700;
+      margin-bottom: 14px;
+    }
+
+    h1 {
+      margin: 0;
+      font-family: "Fraunces", serif;
+      font-size: clamp(2rem, 6vw, 3.4rem);
+      line-height: 1.05;
+    }
+
+    .lead {
+      margin: 20px 0 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 2.4vw, 1.15rem);
+      max-width: 70ch;
+    }
+
+    .section {
+      margin-top: 34px;
+      display: grid;
+      gap: 18px;
+      animation: fadeUp 650ms ease both;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel h2 {
+      margin: 0 0 14px;
+      font-size: 1.25rem;
+      font-family: "Fraunces", serif;
+    }
+
+    .code {
+      background: #101818;
+      color: #d5f7f3;
+      border-radius: 14px;
+      padding: 16px;
+      font-size: 0.95rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      border: 1px solid #1f2b2b;
+      overflow-x: auto;
+    }
+
+    .split {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 6px 12px;
+      background: #ecfdf5;
+      border: 1px solid #bbf7d0;
+      color: #065f46;
+      font-size: 0.82rem;
+      font-weight: 700;
+      margin-bottom: 10px;
+    }
+
+    .quote {
+      margin: 0;
+      font-family: "Fraunces", serif;
+      font-size: clamp(1.3rem, 2.8vw, 1.8rem);
+      line-height: 1.25;
+    }
+
+    .note {
+      margin: 14px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .divider {
+      height: 1px;
+      border: 0;
+      background: linear-gradient(90deg, transparent, var(--line), transparent);
+      margin: 4px 0;
+    }
+
+    @keyframes fadeUp {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 780px) {
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        padding: 28px 20px;
+      }
+
+      .panel {
+        padding: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <span class="eyebrow">Vision</span>
+      <h1>RepoDNA</h1>
+      <p class="lead">
+        Turn software history into structured knowledge for humans and AI agents.
+      </p>
+    </section>
+
+    <section class="section">
+      <article class="panel">
+        <h2>What Agents See Today</h2>
+        <pre class="code">Current State</pre>
+      </article>
+
+      <article class="panel">
+        <h2>What RepoDNA Adds</h2>
+        <pre class="code">Current State
++
+Historical State
++
+Architectural State
++
+Decision State</pre>
+      </article>
+
+      <article class="panel">
+        <h2>Endgame</h2>
+        <pre class="code">Repository
+      ↓
+RepoDNA
+      ↓
+Knowledge Graph
+      ↓
+Claude Code
+Cursor
+Cline
+Gemini CLI
+OpenHands
+Custom Agents</pre>
+        <p class="note">
+          RepoDNA is not a coding assistant. RepoDNA is the knowledge layer beneath coding assistants.
+        </p>
+      </article>
+    </section>
+
+    <hr class="divider" />
+
+    <section class="section">
+      <article class="panel">
+        <span class="pill">North Star</span>
+        <p class="quote">"Why does this code exist?"</p>
+      </article>
+
+      <div class="split">
+        <article class="panel">
+          <h2>Expected Answer</h2>
+          <pre class="code">Created in 2024
+
+Original reason:
+Prevent GPU memory fragmentation
+
+Architectural decision:
+Chosen over slab allocator
+
+Related incidents:
+Issue #421
+Issue #517
+
+Risk:
+High</pre>
+        </article>
+
+        <article class="panel">
+          <h2>Meaning</h2>
+          <p class="note">
+            RepoDNA makes intent explicit. It links code to decision context, architecture rationale,
+            incidents, and long-term risk signals so both humans and agents can reason with confidence.
+          </p>
+        </article>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

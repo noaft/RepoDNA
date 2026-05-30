@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RepoDNA Roadmap</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0f1218;
+      --panel: #171c24;
+      --panel-soft: #1f2631;
+      --ink: #e8edf6;
+      --muted: #a7b2c6;
+      --line: #2f3847;
+      --brand: #19c37d;
+      --accent: #f59e0b;
+      --danger: #ef4444;
+      --shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Manrope", sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 15% 0%, rgba(25, 195, 125, 0.15), transparent 35%),
+        radial-gradient(circle at 100% 20%, rgba(245, 158, 11, 0.12), transparent 30%),
+        linear-gradient(180deg, #0e1218 0%, #0f1117 100%);
+      min-height: 100vh;
+    }
+
+    .wrap {
+      width: min(1120px, 92vw);
+      margin: 40px auto 80px;
+    }
+
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 32px;
+      background: linear-gradient(140deg, rgba(23, 28, 36, 0.92), rgba(23, 28, 36, 0.72));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(6px);
+      animation: rise 500ms ease both;
+    }
+
+    .kicker {
+      display: inline-block;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--brand);
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 6vw, 3.6rem);
+      line-height: 1.05;
+      font-weight: 800;
+    }
+
+    .subtitle {
+      margin-top: 12px;
+      color: var(--muted);
+      max-width: 72ch;
+      font-size: 1.06rem;
+      line-height: 1.65;
+    }
+
+    .timeline {
+      margin-top: 28px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .phase {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--panel);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+      animation: rise 620ms ease both;
+    }
+
+    .phase-head {
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+    }
+
+    .badge {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.84rem;
+      color: #001b11;
+      background: var(--brand);
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .phase h2 {
+      margin: 0;
+      font-size: 1.1rem;
+      font-weight: 800;
+    }
+
+    .content {
+      padding: 18px 20px 22px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .goal {
+      border-left: 3px solid var(--brand);
+      padding-left: 10px;
+      color: #d8e2f3;
+      line-height: 1.65;
+    }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      background: var(--panel-soft);
+      border-radius: 14px;
+      padding: 14px;
+    }
+
+    .card h3 {
+      margin: 0 0 10px;
+      font-size: 0.95rem;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: #dce6f8;
+    }
+
+    .mono {
+      margin: 0;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      color: #c7d2e6;
+      white-space: pre-wrap;
+    }
+
+    .cmd {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px dashed #3d485a;
+      background: #0f141c;
+      font-family: "IBM Plex Mono", monospace;
+      color: #dbfbe9;
+      font-size: 0.92rem;
+    }
+
+    .warning {
+      border-left: 3px solid var(--accent);
+      background: rgba(245, 158, 11, 0.09);
+      padding: 12px;
+      border-radius: 10px;
+      color: #ffe9c7;
+      line-height: 1.6;
+    }
+
+    .north-star {
+      margin-top: 20px;
+      border: 1px solid #264e3d;
+      background: linear-gradient(145deg, rgba(25, 195, 125, 0.13), rgba(25, 195, 125, 0.03));
+      border-radius: 16px;
+      padding: 18px;
+    }
+
+    .north-star h2 {
+      margin: 0 0 10px;
+      font-size: 1.16rem;
+    }
+
+    .footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 0.95rem;
+      text-align: center;
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        padding: 24px;
+      }
+
+      .content {
+        padding: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <span class="kicker">Roadmap</span>
+      <h1>RepoDNA</h1>
+      <p class="subtitle">
+        Build a deep repository intelligence layer that transforms raw software history into structured knowledge for humans and AI agents.
+      </p>
+    </section>
+
+    <section class="timeline">
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 0</span>
+          <h2>Foundation</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Turn a repository into structured data. No AI. No MCP. No Claude.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Input / Output</h3>
+              <p class="mono">Input:
+Git Repository
+
+Output:
+Knowledge Store</p>
+            </div>
+            <div class="card">
+              <h3>Git Scanner</h3>
+              <p class="mono">Collect:
+Commit
+Author
+Date
+Message
+Diff
+
+Example:
+{
+  "commit": "abc123",
+  "author": "John",
+  "message": "Fix OOM issue",
+  "files": ["scheduler.rs"]
+}</p>
+            </div>
+            <div class="card">
+              <h3>AST Scanner</h3>
+              <p class="mono">Collect:
+Module
+Class
+Function
+Imports
+
+Example:
+{
+  "function": "allocate",
+  "file": "cache.rs"
+}</p>
+            </div>
+            <div class="card">
+              <h3>Dependency + Call Graph</h3>
+              <p class="mono">Module A -> Module B
+
+allocate()
+  ↓
+get_free_block()
+  ↓
+evict()</p>
+            </div>
+          </div>
+          <div>
+            <div class="cmd">repodna build .</div>
+            <p class="mono">.repodna/
+commits.db
+functions.db
+dependencies.db</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 1</span>
+          <h2>Repository Graph</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Build the first Knowledge Graph.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Entities</h3>
+              <p class="mono">Repository
+Module
+File
+Function
+Class
+Commit
+Author</p>
+            </div>
+            <div class="card">
+              <h3>Relationships</h3>
+              <p class="mono">calls
+imports
+modifies
+introduced_in
+depends_on
+owns</p>
+            </div>
+          </div>
+          <div class="cmd">repodna graph</div>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 2</span>
+          <h2>Repository Search</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Answer questions using the graph. No AI.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Query</h3>
+              <p class="mono">repodna query "allocate"</p>
+            </div>
+            <div class="card">
+              <h3>Output</h3>
+              <p class="mono">Function: allocate
+Introduced: commit abc123
+Calls: get_free_block, evict
+Modified: 17 times</p>
+            </div>
+          </div>
+          <div class="cmd">repodna inspect allocate</div>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 3</span>
+          <h2>Historical Intelligence</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Start understanding history. This is where LLM usage begins.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Commit Classification</h3>
+              <p class="mono">"Fix OOM issue"
+-> {"type":"bug_fix","category":"memory"}
+
+"Replace FIFO with LRU"
+-> {"type":"architecture_change","from":"FIFO","to":"LRU"}</p>
+            </div>
+            <div class="card">
+              <h3>New Entities</h3>
+              <p class="mono">Decision
+Incident
+Refactor
+Bug Fix
+Feature</p>
+            </div>
+          </div>
+          <div>
+            <div class="cmd">repodna enrich</div>
+            <p class="mono">decisions.db
+incidents.db</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 4</span>
+          <h2>Architecture Intelligence</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Understand the repository like a Staff Engineer.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Module Meaning</h3>
+              <p class="mono">cache -> purpose: GPU memory management, criticality: high
+scheduler -> purpose: request orchestration</p>
+            </div>
+            <div class="card">
+              <h3>Output Layers</h3>
+              <p class="mono">Cache Layer
+Scheduler Layer
+Execution Layer
+Storage Layer</p>
+            </div>
+          </div>
+          <div class="cmd">repodna architecture</div>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 5</span>
+          <h2>MCP Server</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Make it usable by agents.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>Command</h3>
+              <p class="mono">repodna serve</p>
+            </div>
+            <div class="card">
+              <h3>Tools</h3>
+              <p class="mono">get_function_info
+get_commit_history
+get_decision_history
+get_module_summary
+get_architecture_summary</p>
+            </div>
+          </div>
+          <p class="mono">User: Optimize cache
+Claude: RepoDNA says cache is high risk
+Result: smarter code changes.</p>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">Phase 6</span>
+          <h2>Agent Intelligence Layer</h2>
+        </header>
+        <div class="content">
+          <p class="goal">Goal: Let agents reason using Repository Memory.</p>
+          <div class="grid">
+            <div class="card">
+              <h3>New Tools</h3>
+              <p class="mono">why_exists()
+refactor_risk()
+architectural_decisions()
+incident_history()
+ownership_info()</p>
+            </div>
+            <div class="card">
+              <h3>Behavior</h3>
+              <p class="mono">Before changing code:
+"Why was this implemented?"
+
+RepoDNA answers with context.</p>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="phase">
+        <header class="phase-head">
+          <span class="badge">2-3 Years</span>
+          <h2>Long-Term Vision</h2>
+        </header>
+        <div class="content">
+          <div class="grid">
+            <div class="card">
+              <h3>Data Sources</h3>
+              <p class="mono">Git
+PR
+Issue
+ADR
+Notion
+Slack
+Linear
+Jira</p>
+            </div>
+            <div class="card">
+              <h3>Positioning</h3>
+              <p class="mono">GitHub Copilot -> reads code
+RepoDNA -> understands the organization behind the code</p>
+            </div>
+          </div>
+          <p class="mono">Output: Repository Knowledge Graph</p>
+        </div>
+      </article>
+
+      <article class="phase north-star">
+        <header class="phase-head" style="background: transparent; border-bottom: 1px solid rgba(38, 78, 61, 0.65);">
+          <span class="badge" style="background: var(--accent); color: #1b1200;">MVP</span>
+          <h2>Real First Milestone</h2>
+        </header>
+        <div class="content">
+          <div class="warning">
+            Skip 90% of ideas first. Focus on one executable milestone.
+          </div>
+          <div class="cmd">repodna build .</div>
+          <p class="mono">Generate:
+Commit Graph
+Call Graph
+Dependency Graph
+Ownership Graph</p>
+          <div class="cmd">repodna inspect cache</div>
+          <p class="mono">Module: cache
+Functions: 42
+Modified: 317 times
+Top Contributor: Alice
+Dependencies: memory, scheduler
+Risk Level: High</p>
+        </div>
+      </article>
+    </section>
+
+    <p class="footer">RepoDNA Roadmap - foundation first, intelligence second, agents last.</p>
+  </main>
+</body>
+</html>
