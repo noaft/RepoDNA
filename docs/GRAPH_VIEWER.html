@@ -181,6 +181,12 @@
       padding: 4px 9px;
     }
 
+    .chip.alert {
+      border-color: rgba(248, 113, 113, 0.5);
+      color: #fecaca;
+      background: rgba(127, 29, 29, 0.28);
+    }
+
     .kpi {
       border: 1px solid var(--line-soft);
       border-radius: 10px;
@@ -263,6 +269,8 @@
           <span class="chip">Commit</span>
           <span class="chip">Directory</span>
           <span class="chip">File</span>
+          <span class="chip alert">Search hit = red border</span>
+          <span class="chip">Edge between hits = yellow</span>
           <span class="chip">Hotspot: Low=small</span>
           <span class="chip">Medium=mid</span>
           <span class="chip">High=large</span>
@@ -360,6 +368,50 @@
         .style("text-max-width", `${Math.round(maxWidth)}px`)
         .style("text-opacity", textOpacity)
         .update();
+    }
+
+    function clearSearchHighlights() {
+      if (!state.cy) {
+        return;
+      }
+
+      state.cy.nodes().forEach((node) => {
+        node.removeClass("search-hit");
+      });
+      state.cy.edges().removeClass("search-edge");
+    }
+
+    function clearSelectionPanel() {
+      selectedLabelEl.textContent = "None";
+      selectedMetaEl.textContent = "Click a node to inspect metadata.";
+    }
+
+    function applySearchHighlights(resultIds) {
+      if (!state.cy || resultIds.length === 0) {
+        return;
+      }
+
+      clearSearchHighlights();
+
+      const hitSet = new Set(resultIds);
+
+      resultIds.forEach((id) => {
+        const node = state.cy.getElementById(id);
+        if (node && node.length > 0) {
+          node.addClass("search-hit");
+        }
+      });
+
+      state.cy.edges().forEach((edge) => {
+        const sourceId = edge.data("source");
+        const targetId = edge.data("target");
+        const sourceHit = hitSet.has(sourceId);
+        const targetHit = hitSet.has(targetId);
+
+        if (sourceHit && targetHit) {
+          edge.addClass("search-edge");
+        }
+      });
     }
 
     function formatMetadata(raw) {
@@ -468,6 +520,7 @@
         edgeCountEl.textContent = String(edges.length);
 
         render2d(nodes, edges);
+        clearSearchHighlights();
         setStatus("Loaded graph successfully.");
       } catch (err) {
         setStatus("Failed to load graph: " + err.message);
@@ -539,18 +592,21 @@
 
       try {
         const base = getApiBase();
-        const response = await fetch(`${base}/search/nodes?q=${encodeURIComponent(query)}`);
+        const response = await fetch(`${base}/search/bm25?q=${encodeURIComponent(query)}`);
         if (!response.ok) {
           throw new Error("search request failed");
         }
         const results = await response.json();
 
         if (!Array.isArray(results) || results.length === 0) {
+          clearSearchHighlights();
           setStatus("No node found for this search term.");
           return;
         }
 
-        const match = results[0];
+          const match = results[0];
+          const hitIds = results.slice(0, 20).map((item) => item.id);
+          applySearchHighlights(hitIds);
         selectedLabelEl.textContent = `${match.name} (${match.type})`;
         await loadNodeInsights(match.id);
 
@@ -559,13 +615,13 @@
           if (cyNode && cyNode.length > 0) {
             state.cy.animate({
               center: { eles: cyNode },
-              zoom: 1.2,
+              zoom: 1.25,
               duration: 350
             });
           }
         }
 
-        setStatus(`Found node: ${match.name}`);
+        setStatus(`BM25 results: ${results.length}. Best match: ${match.name}`);
       } catch (err) {
         setStatus("Search failed: " + err.message);
       }
@@ -619,7 +675,9 @@
               "text-wrap": "wrap",
               "text-max-width": "150px",
               "text-valign": "bottom",
-              "text-halign": "center"
+              "text-halign": "center",
+              "border-width": 1,
+              "border-color": "#24344d"
             }
           },
           {
@@ -632,6 +690,25 @@
               "target-arrow-color": "#6e82a9",
               "opacity": 0.8
             }
+          },
+          {
+            selector: "node.search-hit",
+            style: {
+              "border-width": 4,
+              "border-color": "#ef4444",
+              "shadow-blur": 18,
+              "shadow-color": "#ef4444",
+              "shadow-opacity": 0.35
+            }
+          },
+          {
+            selector: "edge.search-edge",
+            style: {
+              "line-color": "#facc15",
+              "target-arrow-color": "#facc15",
+              "width": 2.2,
+              "opacity": 1
+            }
           }
         ]
       });
@@ -642,6 +719,8 @@
 
       state.cy.on("tap", "node", (event) => {
         const node = event.target.data();
+        clearSearchHighlights();
+        event.target.addClass("search-hit");
         selectedLabelEl.textContent = node.fullLabel + " (" + node.type + ")";
         loadNodeInsights(node.id);
       });
@@ -680,6 +759,14 @@
     searchInputEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         runSearch();
+      }
+    });
+
+    searchInputEl.addEventListener("input", () => {
+      if (searchInputEl.value.trim() === "") {
+        clearSearchHighlights();
+        clearSelectionPanel();
+        setStatus("Search cleared.");
       }
     });
 

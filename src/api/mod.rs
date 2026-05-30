@@ -23,6 +23,16 @@ pub struct NodeRecord {
 }
 
 #[derive(Serialize)]
+pub struct Bm25SearchResult {
+    pub id: String,
+    pub r#type: String,
+    pub name: String,
+    pub metadata: Option<String>,
+    pub bm25_score: f64,
+    pub relevance: f64,
+}
+
+#[derive(Serialize)]
 pub struct EdgeRecord {
     pub id: i64,
     pub source: String,
@@ -97,6 +107,7 @@ pub fn router(db_path: PathBuf) -> Router {
         .route("/node/{id}/insights", get(get_node_insights))
         .route("/neighbors/{id}", get(get_neighbors))
         .route("/search/nodes", get(search_nodes))
+        .route("/search/bm25", get(search_nodes_bm25))
         .route("/query/commits-by-file/{id}", get(get_commits_by_file))
         .route("/query/files-by-commit/{id}", get(get_files_by_commit))
         .route("/query/commits-by-author/{id}", get(get_commits_by_author))
@@ -178,8 +189,20 @@ fn ensure_graph_schema(db_path: &Path) -> rusqlite::Result<()> {
         ON metadata(entity_type, entity_id);
 
         CREATE INDEX IF NOT EXISTS idx_metadata_key
-        ON metadata(key);",
+        ON metadata(key);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts
+        USING fts5(id, name, metadata, tokenize = 'unicode61');",
     )?;
+
+    // Keep BM25 index fresh for the current database snapshot.
+    conn.execute("DELETE FROM nodes_fts", [])?;
+    conn.execute(
+        "INSERT INTO nodes_fts(id, name, metadata)
+         SELECT id, name, COALESCE(metadata, '') FROM nodes",
+        [],
+    )?;
+
     Ok(())
 }
 
@@ -377,6 +400,51 @@ async fn search_nodes(
                 r#type: row.get(1)?,
                 name: row.get(2)?,
                 metadata: row.get(3)?,
+            })
+        })
+        .map_err(internal_db_error)?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(internal_db_error)?);
+    }
+
+    Ok(Json(items))
+}
+
+async fn search_nodes_bm25(
+    State(state): State<GraphApiState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<Bm25SearchResult>>, (StatusCode, String)> {
+    let term = query.get("q").map(String::as_str).unwrap_or("").trim();
+    if term.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let conn = open_connection(&state.db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.id, n.type, n.name, n.metadata, bm25(nodes_fts) AS score
+             FROM nodes_fts
+             JOIN nodes n ON n.id = nodes_fts.id
+             WHERE nodes_fts MATCH ?1
+             ORDER BY score ASC
+             LIMIT 60",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map(params![term], |row| {
+            let bm25_score: f64 = row.get(4)?;
+            let relevance = 1.0 / (1.0 + bm25_score.abs());
+
+            Ok(Bm25SearchResult {
+                id: row.get(0)?,
+                r#type: row.get(1)?,
+                name: row.get(2)?,
+                metadata: row.get(3)?,
+                bm25_score,
+                relevance,
             })
         })
         .map_err(internal_db_error)?;
