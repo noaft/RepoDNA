@@ -431,6 +431,18 @@
       if (normalized === "commit") {
         return "#26d39a";
       }
+      if (normalized.includes("class")) {
+        return "#a78bfa";
+      }
+      if (normalized.includes("struct")) {
+        return "#38bdf8";
+      }
+      if (normalized.includes("interface")) {
+        return "#34d399";
+      }
+      if (normalized.includes("globalvariable")) {
+        return "#f472b6";
+      }
       if (normalized.includes("file")) {
         return "#7dd3fc";
       }
