@@ -6,7 +6,6 @@ use git2::{DiffOptions, Repository, Sort};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use tower_http::cors::{Any, CorsLayer};
 use serde_json::Value;
@@ -1184,26 +1183,47 @@ fn get_function_insights(
         Err(_) => return Ok(result),
     };
 
-    let workdir = repo.workdir().map(Path::to_path_buf).unwrap_or_else(|| repo_hint.to_path_buf());
-    let absolute_file = workdir.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
-    let function_span = find_function_span_in_file(&absolute_file, &function_name).ok().flatten();
-
     let mut revwalk = repo.revwalk().map_err(internal_git_error)?;
     revwalk.push_head().map_err(internal_git_error)?;
     revwalk
         .set_sorting(Sort::TIME | Sort::TOPOLOGICAL)
         .map_err(internal_git_error)?;
 
+    let mut commit_oids = Vec::new();
     for oid_result in revwalk {
-        let oid = oid_result.map_err(internal_git_error)?;
+        commit_oids.push(oid_result.map_err(internal_git_error)?);
+    }
+    commit_oids.reverse();
+
+    let normalized_file_path = normalize_path(&file_path);
+
+    for oid in commit_oids {
         let commit = repo.find_commit(oid).map_err(internal_git_error)?;
         let commit_tree = commit.tree().map_err(internal_git_error)?;
+        let parent_tree = if commit.parent_count() > 0 {
+            Some(commit.parent(0).map_err(internal_git_error)?.tree().map_err(internal_git_error)?)
+        } else {
+            None
+        };
+
+        let old_span = find_function_span_in_tree(
+            &repo,
+            parent_tree.as_ref(),
+            &normalized_file_path,
+            &function_name,
+        )
+        .map_err(internal_git_error)?;
+        let new_span = find_function_span_in_tree(
+            &repo,
+            Some(&commit_tree),
+            &normalized_file_path,
+            &function_name,
+        )
+        .map_err(internal_git_error)?;
 
         let mut options = DiffOptions::new();
-        let diff = if commit.parent_count() > 0 {
-            let parent = commit.parent(0).map_err(internal_git_error)?;
-            let parent_tree = parent.tree().map_err(internal_git_error)?;
-            repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), Some(&mut options))
+        let diff = if let Some(parent_tree_ref) = parent_tree.as_ref() {
+            repo.diff_tree_to_tree(Some(parent_tree_ref), Some(&commit_tree), Some(&mut options))
                 .map_err(internal_git_error)?
         } else {
             repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut options))
@@ -1216,10 +1236,7 @@ fn get_function_insights(
                 continue;
             };
 
-            let path_matches = pick_delta_path(&delta)
-                .map(|path| normalize_path(&path) == normalize_path(&file_path))
-                .unwrap_or(false);
-            if !path_matches {
+            if !delta_touches_path(&delta, &normalized_file_path) {
                 continue;
             }
 
@@ -1231,35 +1248,49 @@ fn get_function_insights(
                 let (hunk, line_count) = patch.hunk(hunk_index).map_err(internal_git_error)?;
                 let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
 
-                let mut patch_lines = String::new();
-                let mut contains_function_name = header.contains(&function_name);
+                let mut filtered_lines = Vec::<String>::new();
                 for line_index in 0..line_count {
                     let line_in_hunk = patch
                         .line_in_hunk(hunk_index, line_index)
                         .map_err(internal_git_error)?;
                     let content = String::from_utf8_lossy(line_in_hunk.content()).to_string();
-                    if content.contains(&function_name) {
-                        contains_function_name = true;
+
+                    let keep_line = if old_span.is_some() || new_span.is_some() {
+                        let old_in_span = old_span
+                            .map(|(start, end)| {
+                                line_in_hunk
+                                    .old_lineno()
+                                    .map(|line_no| line_no as usize)
+                                    .map(|line_no| line_no >= start && line_no <= end)
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        let new_in_span = new_span
+                            .map(|(start, end)| {
+                                line_in_hunk
+                                    .new_lineno()
+                                    .map(|line_no| line_no as usize)
+                                    .map(|line_no| line_no >= start && line_no <= end)
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+
+                        old_in_span || new_in_span
+                    } else {
+                        line_contains_function_identifier(&content, &function_name)
+                            || line_contains_function_identifier(&header, &function_name)
+                    };
+
+                    if keep_line {
+                        filtered_lines.push(format!("{}{}", line_in_hunk.origin(), content));
                     }
-                    patch_lines.push(line_in_hunk.origin());
-                    patch_lines.push_str(&content);
                 }
 
-                let overlaps_span = function_span
-                    .map(|(start, end)| {
-                        let old_start = hunk.old_start().max(1) as usize;
-                        let old_end = old_start + hunk.old_lines().max(1) as usize - 1;
-                        let new_start = hunk.new_start().max(1) as usize;
-                        let new_end = new_start + hunk.new_lines().max(1) as usize - 1;
-                        ranges_overlap(start, end, old_start, old_end)
-                            || ranges_overlap(start, end, new_start, new_end)
-                    })
-                    .unwrap_or(false);
-
-                if contains_function_name || overlaps_span {
+                if !filtered_lines.is_empty() {
                     matched_hunks.push(FunctionDiffHunk {
                         header,
-                        patch: truncate_text(patch_lines.trim(), 2200),
+                        patch: truncate_text(filtered_lines.join("").trim(), 2200),
                     });
                 }
             }
@@ -1284,20 +1315,21 @@ fn get_function_insights(
     Ok(result)
 }
 
-fn pick_delta_path(delta: &git2::DiffDelta<'_>) -> Option<String> {
+fn delta_touches_path(delta: &git2::DiffDelta<'_>, normalized_target_path: &str) -> bool {
     delta
         .new_file()
         .path()
-        .or_else(|| delta.old_file().path())
-        .map(|path| path.to_string_lossy().to_string())
+        .map(|path| normalize_path(&path.to_string_lossy()) == normalized_target_path)
+        .unwrap_or(false)
+        || delta
+            .old_file()
+            .path()
+            .map(|path| normalize_path(&path.to_string_lossy()) == normalized_target_path)
+            .unwrap_or(false)
 }
 
 fn normalize_path(input: &str) -> String {
     input.replace('\\', "/")
-}
-
-fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
-    a_start <= b_end && b_start <= a_end
 }
 
 fn truncate_text(input: &str, max_len: usize) -> String {
@@ -1310,12 +1342,49 @@ fn truncate_text(input: &str, max_len: usize) -> String {
     output
 }
 
-fn find_function_span_in_file(file_path: &Path, function_name: &str) -> std::io::Result<Option<(usize, usize)>> {
-    let content = fs::read_to_string(file_path)?;
+fn find_function_span_in_tree(
+    repo: &Repository,
+    tree: Option<&git2::Tree<'_>>,
+    file_path: &str,
+    function_name: &str,
+) -> Result<Option<(usize, usize)>, git2::Error> {
+    let Some(tree) = tree else {
+        return Ok(None);
+    };
+
+    let content = match read_file_content_from_tree(repo, tree, file_path)? {
+        Some(content) => content,
+        None => return Ok(None),
+    };
+
+    Ok(find_function_span_in_content(&content, function_name))
+}
+
+fn read_file_content_from_tree(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    file_path: &str,
+) -> Result<Option<String>, git2::Error> {
+    let tree_path = Path::new(file_path);
+    let entry = match tree.get_path(tree_path) {
+        Ok(entry) => entry,
+        Err(err) if err.code() == git2::ErrorCode::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    let object = entry.to_object(repo)?;
+    let Some(blob) = object.as_blob() else {
+        return Ok(None);
+    };
+
+    Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
+}
+
+fn find_function_span_in_content(content: &str, function_name: &str) -> Option<(usize, usize)> {
     let fn_decl_re = regex::Regex::new(
         r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
     )
-    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    .ok()?;
 
     let mut brace_depth = 0i32;
     let mut pending_name: Option<String> = None;
@@ -1350,14 +1419,47 @@ fn find_function_span_in_file(file_path: &Path, function_name: &str) -> std::io:
         if let Some(name) = active_name.clone() {
             if brace_depth <= active_start_depth {
                 if name == function_name {
-                    return Ok(Some((active_start_line, line_number)));
+                    return Some((active_start_line, line_number));
                 }
                 active_name = None;
             }
         }
     }
 
-    Ok(None)
+    None
+}
+
+fn line_contains_function_identifier(line: &str, function_name: &str) -> bool {
+    if function_name.is_empty() {
+        return false;
+    }
+
+    let mut start_index = 0usize;
+    while let Some(found) = line[start_index..].find(function_name) {
+        let absolute = start_index + found;
+        let end = absolute + function_name.len();
+
+        let left_ok = absolute == 0
+            || !line[..absolute]
+                .chars()
+                .next_back()
+                .map(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                .unwrap_or(false);
+        let right_ok = end == line.len()
+            || !line[end..]
+                .chars()
+                .next()
+                .map(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                .unwrap_or(false);
+
+        if left_ok && right_ok {
+            return true;
+        }
+
+        start_index = end;
+    }
+
+    false
 }
 
 fn internal_git_error(err: git2::Error) -> (StatusCode, String) {
