@@ -251,6 +251,7 @@
       <div class="controls">
         <input id="apiBase" value="http://127.0.0.1:3000" aria-label="API base URL" />
         <input id="nodeSearch" placeholder="Search node by name or id" aria-label="Node search" />
+        <button class="btn" id="toggleLifecycleBtn">Show Commit+Author</button>
         <button class="btn" id="toggleNonCodeBtn">Show Non-Code Files</button>
         <button class="btn" id="searchBtn">Search</button>
         <button class="btn primary" id="loadBtn">Load Graph</button>
@@ -258,7 +259,7 @@
       </div>
     </div>
 
-    <p class="status" id="status">Ready. Source Code Focus is ON. Start API with: cargo run -- serve-graph . 127.0.0.1:3000</p>
+    <p class="status" id="status">Ready. CodeGraph mode ON (Commit/Author hidden). Start API with: cargo run -- serve-graph . 127.0.0.1:3000</p>
 
     <section class="board">
       <div class="panel">
@@ -267,9 +268,10 @@
       <aside class="panel side">
         <h2>Selection</h2>
         <div class="legend">
-          <span class="chip">Commit</span>
+          <span class="chip">CodeGraph: Commit/Author hidden</span>
           <span class="chip">Directory</span>
           <span class="chip">File</span>
+          <span class="chip">Function</span>
           <span class="chip alert">Search hit = red border</span>
           <span class="chip">Edge between hits = yellow</span>
           <span class="chip">File heat: Low=small cool</span>
@@ -304,7 +306,8 @@
       cy: null,
       nodes: [],
       edges: [],
-      showNonCodeFiles: false
+      showNonCodeFiles: false,
+      showLifecycleNodes: false
     };
 
     const statusEl = document.getElementById("status");
@@ -313,6 +316,7 @@
     const selectedLabelEl = document.getElementById("selectedLabel");
     const selectedMetaEl = document.getElementById("selectedMeta");
     const searchInputEl = document.getElementById("nodeSearch");
+    const toggleLifecycleBtnEl = document.getElementById("toggleLifecycleBtn");
     const toggleNonCodeBtnEl = document.getElementById("toggleNonCodeBtn");
     const hoverTipEl = document.getElementById("hoverTip");
 
@@ -354,19 +358,23 @@
       return HIDDEN_NON_CODE_EXTENSIONS.has(extension);
     }
 
-    function getVisibleGraph() {
-      if (state.showNonCodeFiles) {
-        return {
-          nodes: state.nodes,
-          edges: state.edges
-        };
-      }
+    function isLifecycleNode(node) {
+      const normalizedType = String(node.type || "").toLowerCase();
+      return normalizedType === "commit" || normalizedType === "author";
+    }
 
+    function getVisibleGraph() {
       const visibleNodeIds = new Set();
       state.nodes.forEach((node) => {
-        if (!isNonCodeFileNode(node)) {
-          visibleNodeIds.add(node.id);
+        if (!state.showLifecycleNodes && isLifecycleNode(node)) {
+          return;
         }
+
+        if (!state.showNonCodeFiles && isNonCodeFileNode(node)) {
+          return;
+        }
+
+        visibleNodeIds.add(node.id);
       });
 
       const visibleEdges = state.edges.filter((edge) => (
@@ -377,6 +385,12 @@
         nodes: state.nodes.filter((node) => visibleNodeIds.has(node.id)),
         edges: visibleEdges
       };
+    }
+
+    function updateLifecycleToggleUi() {
+      const enabled = state.showLifecycleNodes;
+      toggleLifecycleBtnEl.classList.toggle("active", enabled);
+      toggleLifecycleBtnEl.textContent = enabled ? "Hide Commit+Author" : "Show Commit+Author";
     }
 
     function updateNonCodeToggleUi() {
@@ -638,14 +652,21 @@
 
         render2d(visibleGraph.nodes, visibleGraph.edges);
         clearSearchHighlights();
-        if (state.showNonCodeFiles) {
-          setStatus("Loaded graph successfully. Heatmap active for File/Function nodes.");
-        } else {
-          setStatus("Loaded graph successfully. Source Code Focus ON + heatmap active for File/Function nodes.");
-        }
+        setStatus(buildModeStatus("Loaded graph successfully."));
       } catch (err) {
         setStatus("Failed to load graph: " + err.message);
       }
+    }
+
+    function buildModeStatus(prefix) {
+      const lifecyclePart = state.showLifecycleNodes
+        ? "Full graph mode (Commit/Author visible)"
+        : "CodeGraph mode (Commit/Author hidden)";
+      const nonCodePart = state.showNonCodeFiles
+        ? "non-code files visible"
+        : "Source Code Focus ON";
+
+      return `${prefix} ${lifecyclePart}; ${nonCodePart}; heatmap active for File/Function.`;
     }
 
     async function loadNodeInsights(nodeId) {
@@ -763,12 +784,7 @@
       render2d(visibleGraph.nodes, visibleGraph.edges);
       clearSelectionPanel();
       clearSearchHighlights();
-
-      if (state.showNonCodeFiles) {
-        setStatus("Showing code and non-code files.");
-      } else {
-        setStatus("Source Code Focus is ON (non-code files hidden).");
-      }
+      setStatus(buildModeStatus("Graph filters updated."));
     }
 
     function render2d(nodes, edges) {
@@ -900,6 +916,13 @@
     document.getElementById("loadBtn").addEventListener("click", loadGraph);
     document.getElementById("searchBtn").addEventListener("click", runSearch);
     document.getElementById("mode2d").addEventListener("click", center2dGraph);
+    toggleLifecycleBtnEl.addEventListener("click", () => {
+      state.showLifecycleNodes = !state.showLifecycleNodes;
+      updateLifecycleToggleUi();
+      if (state.nodes.length > 0) {
+        rerenderGraphWithCurrentFilter();
+      }
+    });
     toggleNonCodeBtnEl.addEventListener("click", () => {
       state.showNonCodeFiles = !state.showNonCodeFiles;
       updateNonCodeToggleUi();
@@ -923,6 +946,7 @@
 
     window.addEventListener("resize", center2dGraph);
     window.addEventListener("scroll", hideTooltip);
+    updateLifecycleToggleUi();
     updateNonCodeToggleUi();
   </script>
 </body>
