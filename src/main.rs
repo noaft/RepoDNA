@@ -28,6 +28,7 @@ fn main() {
                 println!("AUTHORED_BY edges inserted: {}", report.authored_by_edges_inserted);
                 println!("MODIFIES edges inserted: {}", report.modifies_edges_inserted);
                 println!("CONTAINS edges inserted: {}", report.contains_edges_inserted);
+                println!("CALLS edges inserted: {}", report.call_edges_inserted);
                 println!("Function nodes inserted: {}", report.function_nodes_inserted);
                 println!("Class nodes inserted: {}", report.class_nodes_inserted);
                 println!("Struct nodes inserted: {}", report.struct_nodes_inserted);

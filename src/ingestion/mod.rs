@@ -70,6 +70,11 @@ enum RustSymbolKind {
     GlobalVariable,
 }
 
+struct FunctionFrame {
+    function_name: String,
+    start_depth: i32,
+}
+
 struct RustSymbolNode {
     id: String,
     node_type: String,
@@ -102,12 +107,7 @@ impl RustSymbolKind {
 impl RustSymbolNode {
     fn new(kind: RustSymbolKind, file_path: &str, symbol_name: &str, line: usize) -> Self {
         let node_type = kind.as_node_type().to_string();
-        let symbol_id = format!(
-            "{}_{}_{}",
-            node_type.to_lowercase(),
-            sanitize_id(file_path),
-            sanitize_id(symbol_name)
-        );
+        let symbol_id = rust_symbol_id(&node_type, file_path, symbol_name);
 
         let metadata = json!({
             "file": file_path,
@@ -232,6 +232,16 @@ impl CommitRepository {
         )?;
 
         Ok(rows_affected > 0)
+    }
+
+    pub fn remove_file_to_function_contains_edges(&self) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM edges
+             WHERE relation = 'CONTAINS'
+               AND source IN (SELECT id FROM nodes WHERE type = 'File')
+               AND target IN (SELECT id FROM nodes WHERE type = 'Function')",
+            [],
+        )
     }
 
     pub fn node_count_by_type(&self, node_type: &str) -> rusqlite::Result<usize> {
@@ -516,6 +526,7 @@ pub struct IngestionReport {
     pub authored_by_edges_inserted: usize,
     pub modifies_edges_inserted: usize,
     pub contains_edges_inserted: usize,
+    pub call_edges_inserted: usize,
     pub function_nodes_inserted: usize,
     pub class_nodes_inserted: usize,
     pub struct_nodes_inserted: usize,
@@ -543,6 +554,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     revwalk.push_head()?;
     revwalk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
 
+    let _ = repository.remove_file_to_function_contains_edges()?;
+
     let mut scanned = 0usize;
     let mut commit_nodes_inserted = 0usize;
     let mut author_nodes_inserted = 0usize;
@@ -551,6 +564,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     let mut authored_by_edges_inserted = 0usize;
     let mut modifies_edges_inserted = 0usize;
     let mut contains_edges_inserted = 0usize;
+    let mut call_edges_inserted = 0usize;
     let mut function_nodes_inserted = 0usize;
     let mut class_nodes_inserted = 0usize;
     let mut struct_nodes_inserted = 0usize;
@@ -642,6 +656,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
 
             let content = fs::read_to_string(&rust_file)?;
             let symbols = extract_rust_symbols(&file_path_str, &content)?;
+            let call_edges = extract_rust_function_calls(&file_path_str, &content, &symbols)?;
 
             for symbol in symbols {
                 let inserted = repository.upsert_symbol_node(&symbol)?;
@@ -663,8 +678,16 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                     metadata: Some(json!({ "child_type": symbol.node_type }).to_string()),
                 };
 
-                if repository.upsert_edge(&contains_symbol_edge)? {
-                    contains_edges_inserted += 1;
+                if symbol.node_type != "Function" {
+                    if repository.upsert_edge(&contains_symbol_edge)? {
+                        contains_edges_inserted += 1;
+                    }
+                }
+            }
+
+            for call_edge in call_edges {
+                if repository.upsert_edge(&call_edge)? {
+                    call_edges_inserted += 1;
                 }
             }
         }
@@ -680,6 +703,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + authored_by_edges_inserted
         + modifies_edges_inserted
         + contains_edges_inserted
+        + call_edges_inserted
         + function_nodes_inserted
         + class_nodes_inserted
         + struct_nodes_inserted
@@ -692,6 +716,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + authored_by_edges_inserted
         + modifies_edges_inserted
         + contains_edges_inserted
+        + call_edges_inserted
         + function_nodes_inserted
         + class_nodes_inserted
         + struct_nodes_inserted
@@ -709,6 +734,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         authored_by_edges_inserted,
         modifies_edges_inserted,
         contains_edges_inserted,
+        call_edges_inserted,
         function_nodes_inserted,
         class_nodes_inserted,
         struct_nodes_inserted,
@@ -771,6 +797,125 @@ fn sanitize_id(input: &str) -> String {
             }
         })
         .collect()
+}
+
+fn rust_symbol_id(node_type: &str, file_path: &str, symbol_name: &str) -> String {
+    format!(
+        "{}_{}_{}",
+        node_type.to_lowercase(),
+        sanitize_id(file_path),
+        sanitize_id(symbol_name)
+    )
+}
+
+fn count_braces(line: &str) -> (i32, i32) {
+    let mut open_count = 0i32;
+    let mut close_count = 0i32;
+
+    for ch in line.chars() {
+        if ch == '{' {
+            open_count += 1;
+        } else if ch == '}' {
+            close_count += 1;
+        }
+    }
+
+    (open_count, close_count)
+}
+
+fn strip_line_comment(line: &str) -> &str {
+    if let Some(index) = line.find("//") {
+        &line[..index]
+    } else {
+        line
+    }
+}
+
+fn extract_rust_function_calls(file_path: &str, content: &str, symbols: &[RustSymbolNode]) -> Result<Vec<EdgeRecord>, regex::Error> {
+    let fn_decl_re = Regex::new(
+        r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+    )?;
+    let call_re = Regex::new(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")?;
+
+    let mut function_ids = std::collections::HashMap::<String, String>::new();
+    for symbol in symbols {
+        if symbol.node_type == "Function" {
+            function_ids.insert(symbol.name.clone(), symbol.id.clone());
+        }
+    }
+
+    let mut edges = Vec::<EdgeRecord>::new();
+    let mut seen = HashSet::<(String, String)>::new();
+    let mut function_stack = Vec::<FunctionFrame>::new();
+    let mut pending_function_name: Option<String> = None;
+    let mut brace_depth = 0i32;
+
+    for (index, raw_line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let line = strip_line_comment(raw_line);
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(caps) = fn_decl_re.captures(line) {
+            if let Some(name_match) = caps.get(1) {
+                pending_function_name = Some(name_match.as_str().to_string());
+            }
+        }
+
+        let (open_count, close_count) = count_braces(line);
+
+        if let Some(function_name) = pending_function_name.clone() {
+            if open_count > 0 {
+                function_stack.push(FunctionFrame {
+                    function_name,
+                    start_depth: brace_depth,
+                });
+                pending_function_name = None;
+            }
+        }
+
+        if let Some(current_frame) = function_stack.last() {
+            if let Some(source_id) = function_ids.get(&current_frame.function_name) {
+                for caps in call_re.captures_iter(line) {
+                    if let Some(name_match) = caps.get(1) {
+                        let callee_name = name_match.as_str();
+                        if let Some(target_id) = function_ids.get(callee_name) {
+                            if source_id == target_id {
+                                continue;
+                            }
+
+                            let key = (source_id.clone(), target_id.clone());
+                            if seen.insert(key.clone()) {
+                                edges.push(EdgeRecord {
+                                    source: key.0,
+                                    target: key.1,
+                                    relation: "CALLS".to_string(),
+                                    metadata: Some(json!({
+                                        "file": file_path,
+                                        "line": line_number,
+                                        "callee": callee_name
+                                    }).to_string()),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        brace_depth += open_count - close_count;
+
+        while let Some(current) = function_stack.last() {
+            if brace_depth <= current.start_depth {
+                function_stack.pop();
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok(edges)
 }
 
 fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<DirectoryNode>, Vec<EdgeRecord>) {
@@ -1079,6 +1224,56 @@ fn helper() {}
         assert!(report.interface_nodes_inserted >= 1);
         assert!(report.class_nodes_inserted >= 1);
         assert!(report.global_variable_nodes_inserted >= 1);
+    }
+
+    #[test]
+    fn build_graph_extracts_function_call_edges() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["initial"]);
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+
+        let rust_source = r#"
+fn b() {}
+
+fn a() {
+    b();
+}
+"#;
+
+        std::fs::write(src_dir.join("call_graph.rs"), rust_source)
+            .expect("rust file should be written");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+
+        assert!(report.call_edges_inserted >= 1);
+
+        let db = Connection::open(report.db_path).expect("db should open");
+        let a_id = rust_symbol_id("Function", "src/call_graph.rs", "a");
+        let b_id = rust_symbol_id("Function", "src/call_graph.rs", "b");
+
+        let call_edge_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'CALLS' AND source = ?1 AND target = ?2",
+                params![a_id, b_id],
+                |row| row.get(0),
+            )
+            .expect("calls edge count should succeed");
+
+        let file_to_function_contains_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM edges
+                 WHERE relation = 'CONTAINS'
+                   AND source IN (SELECT id FROM nodes WHERE type = 'File')
+                   AND target IN (?1, ?2)",
+                params![a_id, b_id],
+                |row| row.get(0),
+            )
+            .expect("file-to-function contains count should succeed");
+
+        assert_eq!(call_edge_count, 1);
+        assert_eq!(file_to_function_contains_count, 0);
     }
 
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {
