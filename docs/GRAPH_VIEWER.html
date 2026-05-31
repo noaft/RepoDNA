@@ -214,6 +214,72 @@
       min-height: 120px;
     }
 
+    .diff-view {
+      display: grid;
+      gap: 8px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+
+    .diff-card {
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #0f1726;
+    }
+
+    .diff-header {
+      padding: 8px 10px;
+      color: #d7e6ff;
+      background: #1a2334;
+      border-bottom: 1px solid var(--line-soft);
+      font-weight: 600;
+      word-break: break-word;
+    }
+
+    .diff-body {
+      max-height: 320px;
+      overflow: auto;
+      white-space: pre;
+    }
+
+    .diff-body.large {
+      max-height: 72vh;
+    }
+
+    .diff-line {
+      display: block;
+      padding: 0 10px;
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+
+    .diff-line.add {
+      background: rgba(34, 197, 94, 0.16);
+      color: #bbf7d0;
+    }
+
+    .diff-line.del {
+      background: rgba(239, 68, 68, 0.16);
+      color: #fecaca;
+    }
+
+    .diff-line.hunk {
+      background: rgba(59, 130, 246, 0.16);
+      color: #bfdbfe;
+    }
+
+    .diff-line.ctx {
+      color: #c8d2ea;
+      background: transparent;
+    }
+
+    .diff-line.meta {
+      color: #fde68a;
+      background: rgba(250, 204, 21, 0.08);
+    }
+
     .commit-nav {
       display: none;
       align-items: center;
@@ -240,6 +306,64 @@
     .btn.small {
       padding: 6px 10px;
       font-size: 0.78rem;
+    }
+
+    .popup-launch {
+      margin-top: 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .diff-modal {
+      position: fixed;
+      inset: 0;
+      z-index: 1400;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background: rgba(3, 8, 18, 0.76);
+      backdrop-filter: blur(2px);
+    }
+
+    .diff-modal.open {
+      display: flex;
+    }
+
+    .diff-modal-panel {
+      width: min(1100px, 96vw);
+      max-height: 90vh;
+      border: 1px solid var(--line-soft);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #0d1626;
+      box-shadow: 0 24px 52px rgba(0, 0, 0, 0.45);
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+    }
+
+    .diff-modal-top {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line-soft);
+      background: #182438;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .diff-modal-title {
+      font-weight: 700;
+      color: #eaf1ff;
+      font-size: 0.92rem;
+    }
+
+    .diff-modal-body {
+      overflow: auto;
+      padding: 12px;
+      display: grid;
+      gap: 10px;
     }
 
     .hover-tip {
@@ -323,6 +447,22 @@
     </section>
   </main>
   <div id="hoverTip" class="hover-tip"></div>
+  <div id="diffModal" class="diff-modal" role="dialog" aria-modal="true" aria-label="Function commit diff popup">
+    <div class="diff-modal-panel">
+      <div class="diff-modal-top">
+        <div class="diff-modal-title">Function Diff</div>
+        <button class="btn small" id="closeDiffModalBtn">Close</button>
+      </div>
+      <div class="commit-nav" id="modalCommitNav" style="display:flex; margin: 8px 12px 0;">
+        <div class="meta" id="modalCommitNavMeta">Commit 0/0</div>
+        <div class="actions">
+          <button class="btn small" id="modalPrevCommitBtn">Prev</button>
+          <button class="btn small" id="modalNextCommitBtn">Next</button>
+        </div>
+      </div>
+      <div id="diffModalBody" class="diff-modal-body"></div>
+    </div>
+  </div>
 
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
   <script>
@@ -342,7 +482,10 @@
       nodes: [],
       edges: [],
       showNonCodeFiles: false,
-      showLifecycleNodes: false
+      showLifecycleNodes: false,
+      functionCommitChanges: [],
+      selectedFunctionCommitIndex: 0,
+      isDiffModalOpen: false
     };
 
     const statusEl = document.getElementById("status");
@@ -350,6 +493,17 @@
     const edgeCountEl = document.getElementById("edgeCount");
     const selectedLabelEl = document.getElementById("selectedLabel");
     const selectedMetaEl = document.getElementById("selectedMeta");
+    const commitNavEl = document.getElementById("commitNav");
+    const commitNavMetaEl = document.getElementById("commitNavMeta");
+    const prevCommitBtnEl = document.getElementById("prevCommitBtn");
+    const nextCommitBtnEl = document.getElementById("nextCommitBtn");
+    const diffModalEl = document.getElementById("diffModal");
+    const diffModalBodyEl = document.getElementById("diffModalBody");
+    const closeDiffModalBtnEl = document.getElementById("closeDiffModalBtn");
+    const modalCommitNavEl = document.getElementById("modalCommitNav");
+    const modalCommitNavMetaEl = document.getElementById("modalCommitNavMeta");
+    const modalPrevCommitBtnEl = document.getElementById("modalPrevCommitBtn");
+    const modalNextCommitBtnEl = document.getElementById("modalNextCommitBtn");
     const searchInputEl = document.getElementById("nodeSearch");
     const toggleLifecycleBtnEl = document.getElementById("toggleLifecycleBtn");
     const toggleNonCodeBtnEl = document.getElementById("toggleNonCodeBtn");
@@ -496,6 +650,182 @@
     function clearSelectionPanel() {
       selectedLabelEl.textContent = "None";
       selectedMetaEl.textContent = "Click a node to inspect metadata.";
+      state.functionCommitChanges = [];
+      state.selectedFunctionCommitIndex = 0;
+      closeDiffModal();
+      updateCommitNavigator();
+    }
+
+    function updateCommitNavigator() {
+      const total = state.functionCommitChanges.length;
+      if (total === 0) {
+        commitNavEl.style.display = "none";
+        commitNavMetaEl.textContent = "Commit 0/0";
+        prevCommitBtnEl.disabled = true;
+        nextCommitBtnEl.disabled = true;
+        modalCommitNavMetaEl.textContent = "Commit 0/0";
+        modalPrevCommitBtnEl.disabled = true;
+        modalNextCommitBtnEl.disabled = true;
+        return;
+      }
+
+      const index = state.selectedFunctionCommitIndex;
+      commitNavEl.style.display = "flex";
+      commitNavMetaEl.textContent = `Commit ${index + 1}/${total}`;
+      prevCommitBtnEl.disabled = index <= 0;
+      nextCommitBtnEl.disabled = index >= total - 1;
+      modalCommitNavMetaEl.textContent = `Commit ${index + 1}/${total}`;
+      modalPrevCommitBtnEl.disabled = index <= 0;
+      modalNextCommitBtnEl.disabled = index >= total - 1;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function classifyDiffLine(line) {
+      if (line.startsWith("@@")) {
+        return "hunk";
+      }
+      if (line.startsWith("+")) {
+        return "add";
+      }
+      if (line.startsWith("-")) {
+        return "del";
+      }
+      if (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("---") || line.startsWith("+++")) {
+        return "meta";
+      }
+      return "ctx";
+    }
+
+    function renderPatchHtml(patch) {
+      const lines = String(patch || "").split(/\r?\n/);
+      return lines
+        .map((line) => `<span class="diff-line ${classifyDiffLine(line)}">${escapeHtml(line)}</span>`)
+        .join("");
+    }
+
+    function renderPatchPreviewHtml(patch, maxLines = 14) {
+      const lines = String(patch || "").split(/\r?\n/);
+      const shown = lines.slice(0, maxLines);
+      const hasMore = lines.length > maxLines;
+      const html = shown
+        .map((line) => `<span class="diff-line ${classifyDiffLine(line)}">${escapeHtml(line)}</span>`)
+        .join("");
+      return hasMore
+        ? html + '<span class="diff-line meta">... (preview only, open popup to view full)</span>'
+        : html;
+    }
+
+    function closeDiffModal() {
+      state.isDiffModalOpen = false;
+      diffModalEl.classList.remove("open");
+      diffModalBodyEl.innerHTML = "";
+    }
+
+    function openDiffModal() {
+      if (state.functionCommitChanges.length === 0) {
+        return;
+      }
+      state.isDiffModalOpen = true;
+      diffModalEl.classList.add("open");
+      renderDiffModalContent();
+    }
+
+    function renderDiffModalContent() {
+      if (!state.isDiffModalOpen) {
+        return;
+      }
+
+      const total = state.functionCommitChanges.length;
+      const index = state.selectedFunctionCommitIndex;
+      const change = state.functionCommitChanges[index];
+      if (!change) {
+        diffModalBodyEl.innerHTML = "<p>No commit selected.</p>";
+        return;
+      }
+
+      const commitTitle = `${change.commit_id.slice(0, 10)} ${change.author} - ${change.message}`;
+      const cards = (Array.isArray(change.hunks) ? change.hunks : []).map((hunk) => {
+        return [
+          '<section class="diff-card">',
+          `<div class="diff-header">${escapeHtml(hunk.header || "Diff hunk")}</div>`,
+          `<div class="diff-body large">${renderPatchHtml(hunk.patch || "")}</div>`,
+          '</section>'
+        ].join("");
+      }).join("");
+
+      diffModalBodyEl.innerHTML = [
+        '<div class="diff-view">',
+        `<div><strong>Function commit ${index + 1}/${total}</strong></div>`,
+        `<div>${escapeHtml(commitTitle)}</div>`,
+        cards || '<div class="diff-card"><div class="diff-header">No hunk details available for this commit.</div></div>',
+        '</div>'
+      ].join("");
+    }
+
+    function renderFunctionCommitDetails(change, index, total) {
+      const commitTitle = `${change.commit_id.slice(0, 10)} ${change.author} - ${change.message}`;
+
+      if (!Array.isArray(change.hunks) || change.hunks.length === 0) {
+        selectedMetaEl.innerHTML = [
+          `<div><strong>Function commit ${index + 1}/${total}</strong></div>`,
+          `<div>${escapeHtml(commitTitle)}</div>`,
+          `<div class="popup-launch"><button class="btn small" id="openDiffPopupBtn">Open Diff Popup</button></div>`,
+          "<br>No hunk details available for this commit."
+        ].join("");
+        const openBtn = document.getElementById("openDiffPopupBtn");
+        if (openBtn) {
+          openBtn.addEventListener("click", openDiffModal);
+        }
+        return;
+      }
+
+      const cards = change.hunks.slice(0, 1).map((hunk) => {
+        return [
+          '<section class="diff-card">',
+          `<div class="diff-header">${escapeHtml(hunk.header || "Diff hunk")}</div>`,
+          `<div class="diff-body">${renderPatchPreviewHtml(hunk.patch || "")}</div>`,
+          '</section>'
+        ].join("");
+      }).join("");
+
+      selectedMetaEl.innerHTML = [
+        '<div class="diff-view">',
+        `<div><strong>Function commit ${index + 1}/${total}</strong></div>`,
+        `<div>${escapeHtml(commitTitle)}</div>`,
+        `<div class="popup-launch"><button class="btn small" id="openDiffPopupBtn">Open Diff Popup</button></div>`,
+        cards,
+        '</div>'
+      ].join("");
+
+      const openBtn = document.getElementById("openDiffPopupBtn");
+      if (openBtn) {
+        openBtn.addEventListener("click", openDiffModal);
+      }
+    }
+
+    function renderSelectedFunctionCommit() {
+      const total = state.functionCommitChanges.length;
+      if (total === 0) {
+        return;
+      }
+
+      const index = state.selectedFunctionCommitIndex;
+      const change = state.functionCommitChanges[index];
+      if (!change) {
+        return;
+      }
+
+      renderFunctionCommitDetails(change, index, total);
+      updateCommitNavigator();
+      renderDiffModalContent();
     }
 
     function applySearchHighlights(resultIds) {
@@ -713,6 +1043,11 @@
         }
 
         const insights = await response.json();
+
+        state.functionCommitChanges = [];
+        state.selectedFunctionCommitIndex = 0;
+        updateCommitNavigator();
+
         const lines = [];
         lines.push(`ID: ${insights.node.id}`);
         lines.push(`Type: ${insights.node.type}`);
@@ -758,16 +1093,14 @@
           lines.push(`Function changes found: ${insights.function_insights.commit_count}`);
 
           if (Array.isArray(insights.function_insights.changes) && insights.function_insights.changes.length > 0) {
-            lines.push("Recent changes:");
-            insights.function_insights.changes.slice(0, 8).forEach((change, index) => {
-              lines.push(`\n#${index + 1} ${change.commit_id.slice(0, 10)} ${change.author} - ${change.message}`);
-              if (Array.isArray(change.hunks)) {
-                change.hunks.slice(0, 2).forEach((hunk) => {
-                  lines.push(`  ${hunk.header}`);
-                  lines.push(hunk.patch);
-                });
-              }
-            });
+            state.functionCommitChanges = insights.function_insights.changes;
+            state.selectedFunctionCommitIndex = 0;
+            lines.push("Use Prev/Next to browse function commits.");
+            selectedMetaEl.textContent = lines.join("\n");
+            renderSelectedFunctionCommit();
+            return;
+          } else {
+            lines.push("No commit-level function diff found.");
           }
         }
 
@@ -1001,6 +1334,37 @@
 
     window.addEventListener("resize", center2dGraph);
     window.addEventListener("scroll", hideTooltip);
+    prevCommitBtnEl.addEventListener("click", () => {
+      if (state.selectedFunctionCommitIndex > 0) {
+        state.selectedFunctionCommitIndex -= 1;
+        renderSelectedFunctionCommit();
+      }
+    });
+    nextCommitBtnEl.addEventListener("click", () => {
+      if (state.selectedFunctionCommitIndex < state.functionCommitChanges.length - 1) {
+        state.selectedFunctionCommitIndex += 1;
+        renderSelectedFunctionCommit();
+      }
+    });
+    modalPrevCommitBtnEl.addEventListener("click", () => {
+      if (state.selectedFunctionCommitIndex > 0) {
+        state.selectedFunctionCommitIndex -= 1;
+        renderSelectedFunctionCommit();
+      }
+    });
+    modalNextCommitBtnEl.addEventListener("click", () => {
+      if (state.selectedFunctionCommitIndex < state.functionCommitChanges.length - 1) {
+        state.selectedFunctionCommitIndex += 1;
+        renderSelectedFunctionCommit();
+      }
+    });
+    closeDiffModalBtnEl.addEventListener("click", closeDiffModal);
+    diffModalEl.addEventListener("click", (event) => {
+      if (event.target === diffModalEl) {
+        closeDiffModal();
+      }
+    });
+    updateCommitNavigator();
     updateLifecycleToggleUi();
     updateNonCodeToggleUi();
   </script>
