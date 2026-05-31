@@ -251,13 +251,14 @@
       <div class="controls">
         <input id="apiBase" value="http://127.0.0.1:3000" aria-label="API base URL" />
         <input id="nodeSearch" placeholder="Search node by name or id" aria-label="Node search" />
+        <button class="btn" id="toggleNonCodeBtn">Show Non-Code Files</button>
         <button class="btn" id="searchBtn">Search</button>
         <button class="btn primary" id="loadBtn">Load Graph</button>
         <button class="btn active" id="mode2d">2D</button>
       </div>
     </div>
 
-    <p class="status" id="status">Ready. Start API with: cargo run -- serve-graph . 127.0.0.1:3000</p>
+    <p class="status" id="status">Ready. Source Code Focus is ON. Start API with: cargo run -- serve-graph . 127.0.0.1:3000</p>
 
     <section class="board">
       <div class="panel">
@@ -287,10 +288,22 @@
 
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
   <script>
+    const HIDDEN_NON_CODE_EXTENSIONS = new Set([
+      ".md",
+      ".txt",
+      ".lock",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".svg",
+      ".gif"
+    ]);
+
     const state = {
       cy: null,
       nodes: [],
-      edges: []
+      edges: [],
+      showNonCodeFiles: false
     };
 
     const statusEl = document.getElementById("status");
@@ -299,6 +312,7 @@
     const selectedLabelEl = document.getElementById("selectedLabel");
     const selectedMetaEl = document.getElementById("selectedMeta");
     const searchInputEl = document.getElementById("nodeSearch");
+    const toggleNonCodeBtnEl = document.getElementById("toggleNonCodeBtn");
     const hoverTipEl = document.getElementById("hoverTip");
 
     function setStatus(message) {
@@ -320,6 +334,54 @@
       const normalized = String(pathValue || "").replace(/\\/g, "/");
       const parts = normalized.split("/");
       return parts[parts.length - 1] || normalized;
+    }
+
+    function getFileExtension(pathValue) {
+      const name = basename(pathValue).toLowerCase();
+      const lastDot = name.lastIndexOf(".");
+      if (lastDot <= 0) {
+        return "";
+      }
+      return name.slice(lastDot);
+    }
+
+    function isNonCodeFileNode(node) {
+      if (String(node.type || "").toLowerCase() !== "file") {
+        return false;
+      }
+      const extension = getFileExtension(node.name || node.id || "");
+      return HIDDEN_NON_CODE_EXTENSIONS.has(extension);
+    }
+
+    function getVisibleGraph() {
+      if (state.showNonCodeFiles) {
+        return {
+          nodes: state.nodes,
+          edges: state.edges
+        };
+      }
+
+      const visibleNodeIds = new Set();
+      state.nodes.forEach((node) => {
+        if (!isNonCodeFileNode(node)) {
+          visibleNodeIds.add(node.id);
+        }
+      });
+
+      const visibleEdges = state.edges.filter((edge) => (
+        visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
+      ));
+
+      return {
+        nodes: state.nodes.filter((node) => visibleNodeIds.has(node.id)),
+        edges: visibleEdges
+      };
+    }
+
+    function updateNonCodeToggleUi() {
+      const enabled = state.showNonCodeFiles;
+      toggleNonCodeBtnEl.classList.toggle("active", enabled);
+      toggleNonCodeBtnEl.textContent = enabled ? "Hide Non-Code Files" : "Show Non-Code Files";
     }
 
     function getDisplayLabel(node) {
@@ -528,12 +590,17 @@
         state.nodes = nodes;
         state.edges = edges;
 
-        nodeCountEl.textContent = String(nodes.length);
-        edgeCountEl.textContent = String(edges.length);
+        const visibleGraph = getVisibleGraph();
+        nodeCountEl.textContent = String(visibleGraph.nodes.length);
+        edgeCountEl.textContent = String(visibleGraph.edges.length);
 
-        render2d(nodes, edges);
+        render2d(visibleGraph.nodes, visibleGraph.edges);
         clearSearchHighlights();
-        setStatus("Loaded graph successfully.");
+        if (state.showNonCodeFiles) {
+          setStatus("Loaded graph successfully. Showing code and non-code files.");
+        } else {
+          setStatus("Loaded graph successfully. Source Code Focus is ON (non-code files hidden).");
+        }
       } catch (err) {
         setStatus("Failed to load graph: " + err.message);
       }
@@ -616,9 +683,17 @@
           return;
         }
 
-          const match = results[0];
-          const hitIds = results.slice(0, 20).map((item) => item.id);
-          applySearchHighlights(hitIds);
+        const visibleNodeIds = state.cy ? new Set(state.cy.nodes().map((node) => node.id())) : new Set();
+        const visibleResults = results.filter((item) => visibleNodeIds.has(item.id));
+        if (visibleResults.length === 0) {
+          clearSearchHighlights();
+          setStatus("Results found, but all matches are hidden by Source Code Focus.");
+          return;
+        }
+
+        const match = visibleResults[0];
+        const hitIds = visibleResults.slice(0, 20).map((item) => item.id);
+        applySearchHighlights(hitIds);
         selectedLabelEl.textContent = `${match.name} (${match.type})`;
         await loadNodeInsights(match.id);
 
@@ -633,9 +708,24 @@
           }
         }
 
-        setStatus(`BM25 results: ${results.length}. Best match: ${match.name}`);
+        setStatus(`BM25 visible results: ${visibleResults.length}. Best match: ${match.name}`);
       } catch (err) {
         setStatus("Search failed: " + err.message);
+      }
+    }
+
+    function rerenderGraphWithCurrentFilter() {
+      const visibleGraph = getVisibleGraph();
+      nodeCountEl.textContent = String(visibleGraph.nodes.length);
+      edgeCountEl.textContent = String(visibleGraph.edges.length);
+      render2d(visibleGraph.nodes, visibleGraph.edges);
+      clearSelectionPanel();
+      clearSearchHighlights();
+
+      if (state.showNonCodeFiles) {
+        setStatus("Showing code and non-code files.");
+      } else {
+        setStatus("Source Code Focus is ON (non-code files hidden).");
       }
     }
 
@@ -768,6 +858,13 @@
     document.getElementById("loadBtn").addEventListener("click", loadGraph);
     document.getElementById("searchBtn").addEventListener("click", runSearch);
     document.getElementById("mode2d").addEventListener("click", center2dGraph);
+    toggleNonCodeBtnEl.addEventListener("click", () => {
+      state.showNonCodeFiles = !state.showNonCodeFiles;
+      updateNonCodeToggleUi();
+      if (state.nodes.length > 0) {
+        rerenderGraphWithCurrentFilter();
+      }
+    });
     searchInputEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         runSearch();
@@ -784,6 +881,7 @@
 
     window.addEventListener("resize", center2dGraph);
     window.addEventListener("scroll", hideTooltip);
+    updateNonCodeToggleUi();
   </script>
 </body>
 </html>

@@ -1,7 +1,10 @@
 use git2::{Repository, Sort};
+use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::json;
 use std::collections::HashSet;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 /// Node model for graph storage.
@@ -57,6 +60,69 @@ struct FileHotspotMetric {
     file_name: String,
     churn_score: i64,
     level: String,
+}
+
+enum RustSymbolKind {
+    Function,
+    Struct,
+    Interface,
+    Class,
+    GlobalVariable,
+}
+
+struct RustSymbolNode {
+    id: String,
+    node_type: String,
+    name: String,
+    metadata: String,
+}
+
+impl RustSymbolKind {
+    fn as_node_type(&self) -> &'static str {
+        match self {
+            Self::Function => "Function",
+            Self::Struct => "Struct",
+            Self::Interface => "Interface",
+            Self::Class => "Class",
+            Self::GlobalVariable => "GlobalVariable",
+        }
+    }
+
+    fn as_relation_hint(&self) -> &'static str {
+        match self {
+            Self::Function => "function",
+            Self::Struct => "struct",
+            Self::Interface => "trait",
+            Self::Class => "impl",
+            Self::GlobalVariable => "global",
+        }
+    }
+}
+
+impl RustSymbolNode {
+    fn new(kind: RustSymbolKind, file_path: &str, symbol_name: &str, line: usize) -> Self {
+        let node_type = kind.as_node_type().to_string();
+        let symbol_id = format!(
+            "{}_{}_{}",
+            node_type.to_lowercase(),
+            sanitize_id(file_path),
+            sanitize_id(symbol_name)
+        );
+
+        let metadata = json!({
+            "file": file_path,
+            "line": line,
+            "rust_symbol_kind": kind.as_relation_hint()
+        })
+        .to_string();
+
+        Self {
+            id: symbol_id,
+            node_type,
+            name: symbol_name.to_string(),
+            metadata,
+        }
+    }
 }
 
 impl CommitNode {
@@ -150,6 +216,10 @@ impl CommitRepository {
     }
 
     pub fn upsert_directory_node(&self, node: &DirectoryNode) -> rusqlite::Result<bool> {
+        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+    }
+
+    pub fn upsert_symbol_node(&self, node: &RustSymbolNode) -> rusqlite::Result<bool> {
         self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
     }
 
@@ -446,6 +516,11 @@ pub struct IngestionReport {
     pub authored_by_edges_inserted: usize,
     pub modifies_edges_inserted: usize,
     pub contains_edges_inserted: usize,
+    pub function_nodes_inserted: usize,
+    pub class_nodes_inserted: usize,
+    pub struct_nodes_inserted: usize,
+    pub interface_nodes_inserted: usize,
+    pub global_variable_nodes_inserted: usize,
     pub ownership_files_computed: usize,
     pub hotspot_files_computed: usize,
     pub duplicates_skipped: usize,
@@ -476,6 +551,11 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     let mut authored_by_edges_inserted = 0usize;
     let mut modifies_edges_inserted = 0usize;
     let mut contains_edges_inserted = 0usize;
+    let mut function_nodes_inserted = 0usize;
+    let mut class_nodes_inserted = 0usize;
+    let mut struct_nodes_inserted = 0usize;
+    let mut interface_nodes_inserted = 0usize;
+    let mut global_variable_nodes_inserted = 0usize;
 
     for oid_result in revwalk {
         let oid = oid_result?;
@@ -536,6 +616,60 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         }
     }
 
+    if let Some(workdir) = repo.workdir() {
+        let rust_files = collect_rust_source_files(workdir)?;
+        for rust_file in rust_files {
+            let file_path = rust_file.strip_prefix(workdir).unwrap_or(&rust_file);
+            let file_path_str = file_path.to_string_lossy().replace('\\', "/");
+
+            let file_node = FileNode::from_path(&file_path_str);
+            if repository.upsert_file_node(&file_node)? {
+                file_nodes_inserted += 1;
+            }
+
+            let (directory_nodes, contains_edges) =
+                build_directory_hierarchy(&file_path_str, &file_node.id);
+            for directory_node in directory_nodes {
+                if repository.upsert_directory_node(&directory_node)? {
+                    directory_nodes_inserted += 1;
+                }
+            }
+            for contains_edge in contains_edges {
+                if repository.upsert_edge(&contains_edge)? {
+                    contains_edges_inserted += 1;
+                }
+            }
+
+            let content = fs::read_to_string(&rust_file)?;
+            let symbols = extract_rust_symbols(&file_path_str, &content)?;
+
+            for symbol in symbols {
+                let inserted = repository.upsert_symbol_node(&symbol)?;
+                if inserted {
+                    match symbol.node_type.as_str() {
+                        "Function" => function_nodes_inserted += 1,
+                        "Class" => class_nodes_inserted += 1,
+                        "Struct" => struct_nodes_inserted += 1,
+                        "Interface" => interface_nodes_inserted += 1,
+                        "GlobalVariable" => global_variable_nodes_inserted += 1,
+                        _ => {}
+                    }
+                }
+
+                let contains_symbol_edge = EdgeRecord {
+                    source: file_node.id.clone(),
+                    target: symbol.id,
+                    relation: "CONTAINS".to_string(),
+                    metadata: Some(json!({ "child_type": symbol.node_type }).to_string()),
+                };
+
+                if repository.upsert_edge(&contains_symbol_edge)? {
+                    contains_edges_inserted += 1;
+                }
+            }
+        }
+    }
+
     let ownership_files_computed = repository.compute_and_store_file_ownership()?;
     let hotspot_files_computed = repository.compute_and_store_file_hotspots()?;
 
@@ -545,14 +679,24 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + directory_nodes_inserted
         + authored_by_edges_inserted
         + modifies_edges_inserted
-        + contains_edges_inserted;
+        + contains_edges_inserted
+        + function_nodes_inserted
+        + class_nodes_inserted
+        + struct_nodes_inserted
+        + interface_nodes_inserted
+        + global_variable_nodes_inserted;
     let inserted_total = commit_nodes_inserted
         + author_nodes_inserted
         + file_nodes_inserted
         + directory_nodes_inserted
         + authored_by_edges_inserted
         + modifies_edges_inserted
-        + contains_edges_inserted;
+        + contains_edges_inserted
+        + function_nodes_inserted
+        + class_nodes_inserted
+        + struct_nodes_inserted
+        + interface_nodes_inserted
+        + global_variable_nodes_inserted;
 
     let duplicates_skipped = total_possible.saturating_sub(inserted_total);
 
@@ -565,6 +709,11 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         authored_by_edges_inserted,
         modifies_edges_inserted,
         contains_edges_inserted,
+        function_nodes_inserted,
+        class_nodes_inserted,
+        struct_nodes_inserted,
+        interface_nodes_inserted,
+        global_variable_nodes_inserted,
         ownership_files_computed,
         hotspot_files_computed,
         duplicates_skipped,
@@ -669,6 +818,104 @@ fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<Direct
     }
 
     (directories, contains_edges)
+}
+
+fn collect_rust_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+    fn walk(dir: &Path, acc: &mut Vec<PathBuf>) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_dir() {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir_name == ".git" || dir_name == "target" || dir_name == "node_modules" {
+                    continue;
+                }
+                walk(&path, acc)?;
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                acc.push(path);
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut files = Vec::<PathBuf>::new();
+    walk(root, &mut files)?;
+    files.sort();
+    Ok(files)
+}
+
+fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbolNode>, regex::Error> {
+    let fn_re = Regex::new(r"^\s*(pub\s+)?(async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")?;
+    let struct_re = Regex::new(r"^\s*(pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)")?;
+    let trait_re = Regex::new(r"^\s*(pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)")?;
+    let impl_re = Regex::new(r"^\s*impl(?:<[^>]+>)?\s+([A-Za-z_][A-Za-z0-9_]*)")?;
+    let global_re = Regex::new(r"^\s*(pub\s+)?(static|const)\s+(mut\s+)?([A-Za-z_][A-Za-z0-9_]*)")?;
+
+    let mut symbols = Vec::<RustSymbolNode>::new();
+    let mut seen = HashSet::<String>::new();
+
+    for (index, line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+
+        if let Some(caps) = struct_re.captures(line) {
+            if let Some(name_match) = caps.get(2) {
+                let symbol = RustSymbolNode::new(RustSymbolKind::Struct, file_path, name_match.as_str(), line_number);
+                if seen.insert(symbol.id.clone()) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+
+        if let Some(caps) = trait_re.captures(line) {
+            if let Some(name_match) = caps.get(2) {
+                let symbol = RustSymbolNode::new(RustSymbolKind::Interface, file_path, name_match.as_str(), line_number);
+                if seen.insert(symbol.id.clone()) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+
+        if let Some(caps) = impl_re.captures(line) {
+            if let Some(name_match) = caps.get(1) {
+                let class_name = format!("impl {}", name_match.as_str());
+                let symbol = RustSymbolNode::new(RustSymbolKind::Class, file_path, &class_name, line_number);
+                if seen.insert(symbol.id.clone()) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+
+        if let Some(caps) = fn_re.captures(line) {
+            if let Some(name_match) = caps.get(3) {
+                let symbol = RustSymbolNode::new(RustSymbolKind::Function, file_path, name_match.as_str(), line_number);
+                if seen.insert(symbol.id.clone()) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+
+        if let Some(caps) = global_re.captures(line) {
+            if let Some(name_match) = caps.get(4) {
+                let symbol = RustSymbolNode::new(
+                    RustSymbolKind::GlobalVariable,
+                    file_path,
+                    name_match.as_str(),
+                    line_number,
+                );
+                if seen.insert(symbol.id.clone()) {
+                    symbols.push(symbol);
+                }
+            }
+        }
+    }
+
+    Ok(symbols)
 }
 
 fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
@@ -798,6 +1045,40 @@ mod tests {
         assert_eq!(second.commit_nodes_inserted, 0);
         assert_eq!(commit_count, 2);
         assert_eq!(authored_by_count, 2);
+    }
+
+    #[test]
+    fn build_graph_extracts_rust_symbol_nodes() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["initial"]);
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+
+        let rust_source = r#"
+pub static GLOBAL_COUNT: usize = 1;
+
+pub struct Cache {}
+
+pub trait Repository {
+    fn get(&self);
+}
+
+impl Cache {
+    pub fn allocate(&self) {}
+}
+
+fn helper() {}
+"#;
+
+        std::fs::write(src_dir.join("lib.rs"), rust_source).expect("rust file should be written");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+
+        assert!(report.function_nodes_inserted >= 2);
+        assert!(report.struct_nodes_inserted >= 1);
+        assert!(report.interface_nodes_inserted >= 1);
+        assert!(report.class_nodes_inserted >= 1);
+        assert!(report.global_variable_nodes_inserted >= 1);
     }
 
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {
