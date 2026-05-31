@@ -214,6 +214,34 @@
       min-height: 120px;
     }
 
+    .commit-nav {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      padding: 8px;
+      background: #101826;
+    }
+
+    .commit-nav .meta {
+      font-size: 0.8rem;
+      color: #b9c7e5;
+      font-family: "IBM Plex Mono", monospace;
+    }
+
+    .commit-nav .actions {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn.small {
+      padding: 6px 10px;
+      font-size: 0.78rem;
+    }
+
     .hover-tip {
       position: fixed;
       z-index: 1000;
@@ -283,6 +311,13 @@
         <div class="kpi"><strong>Nodes:</strong> <span id="nodeCount">0</span></div>
         <div class="kpi"><strong>Edges:</strong> <span id="edgeCount">0</span></div>
         <div class="kpi"><strong>Selected:</strong> <span id="selectedLabel">None</span></div>
+        <div class="commit-nav" id="commitNav">
+          <div class="meta" id="commitNavMeta">Commit 0/0</div>
+          <div class="actions">
+            <button class="btn small" id="prevCommitBtn">Prev</button>
+            <button class="btn small" id="nextCommitBtn">Next</button>
+          </div>
+        </div>
         <p class="mono" id="selectedMeta">Click a node to inspect metadata.</p>
       </aside>
     </section>
@@ -712,6 +747,26 @@
             lines.push("Ownership:");
             insights.author_insights.ownership.slice(0, 5).forEach((entry) => {
               lines.push(`- ${entry.file_name} (${entry.commit_count})`);
+            });
+          }
+        }
+
+        if (insights.function_insights) {
+          lines.push("");
+          lines.push(`Function file: ${insights.function_insights.file}`);
+          lines.push(`Function line: ${insights.function_insights.line}`);
+          lines.push(`Function changes found: ${insights.function_insights.commit_count}`);
+
+          if (Array.isArray(insights.function_insights.changes) && insights.function_insights.changes.length > 0) {
+            lines.push("Recent changes:");
+            insights.function_insights.changes.slice(0, 8).forEach((change, index) => {
+              lines.push(`\n#${index + 1} ${change.commit_id.slice(0, 10)} ${change.author} - ${change.message}`);
+              if (Array.isArray(change.hunks)) {
+                change.hunks.slice(0, 2).forEach((hunk) => {
+                  lines.push(`  ${hunk.header}`);
+                  lines.push(hunk.patch);
+                });
+              }
             });
           }
         }

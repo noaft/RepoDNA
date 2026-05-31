@@ -2,9 +2,11 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
+use git2::{DiffOptions, Repository, Sort};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use tower_http::cors::{Any, CorsLayer};
 use serde_json::Value;
@@ -106,10 +108,35 @@ pub struct AuthorInsights {
 }
 
 #[derive(Serialize)]
+pub struct FunctionDiffHunk {
+    pub header: String,
+    pub patch: String,
+}
+
+#[derive(Serialize)]
+pub struct FunctionChangeItem {
+    pub commit_id: String,
+    pub message: String,
+    pub author: String,
+    pub timestamp: i64,
+    pub hunks: Vec<FunctionDiffHunk>,
+}
+
+#[derive(Serialize)]
+pub struct FunctionInsights {
+    pub file: String,
+    pub function: String,
+    pub line: usize,
+    pub commit_count: usize,
+    pub changes: Vec<FunctionChangeItem>,
+}
+
+#[derive(Serialize)]
 pub struct NodeInsightsResponse {
     pub node: NodeRecord,
     pub file_insights: Option<FileInsights>,
     pub author_insights: Option<AuthorInsights>,
+    pub function_insights: Option<FunctionInsights>,
 }
 
 pub fn router(db_path: PathBuf) -> Router {
@@ -862,6 +889,7 @@ async fn get_node_insights(
                 hotspot: hotspot.map(|item| item.hotspot),
             }),
             author_insights: None,
+            function_insights: None,
         }));
     }
 
@@ -888,6 +916,17 @@ async fn get_node_insights(
                 modified_files,
                 ownership,
             }),
+            function_insights: None,
+        }));
+    }
+
+    if node.r#type == "Function" {
+        let function_insights = get_function_insights(&state.db_path, &node)?;
+        return Ok(Json(NodeInsightsResponse {
+            node,
+            file_insights: None,
+            author_insights: None,
+            function_insights: Some(function_insights),
         }));
     }
 
@@ -895,6 +934,7 @@ async fn get_node_insights(
         node,
         file_insights: None,
         author_insights: None,
+        function_insights: None,
     }))
 }
 
@@ -1106,6 +1146,225 @@ fn get_hotspot_for_file(
             .unwrap_or("Low")
             .to_string(),
     }))
+}
+
+fn get_function_insights(
+    db_path: &Path,
+    node: &NodeRecord,
+) -> Result<FunctionInsights, (StatusCode, String)> {
+    let metadata_raw = node.metadata.clone().unwrap_or_default();
+    let metadata: Value = serde_json::from_str(&metadata_raw).unwrap_or(Value::Null);
+
+    let function_name = node.name.clone();
+    let file_path = metadata
+        .get("file")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let line = metadata
+        .get("line")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+
+    let mut result = FunctionInsights {
+        file: file_path.clone(),
+        function: function_name.clone(),
+        line,
+        commit_count: 0,
+        changes: Vec::new(),
+    };
+
+    if file_path.is_empty() {
+        return Ok(result);
+    }
+
+    let repo_hint = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let repo = match Repository::discover(repo_hint) {
+        Ok(repo) => repo,
+        Err(_) => return Ok(result),
+    };
+
+    let workdir = repo.workdir().map(Path::to_path_buf).unwrap_or_else(|| repo_hint.to_path_buf());
+    let absolute_file = workdir.join(file_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+    let function_span = find_function_span_in_file(&absolute_file, &function_name).ok().flatten();
+
+    let mut revwalk = repo.revwalk().map_err(internal_git_error)?;
+    revwalk.push_head().map_err(internal_git_error)?;
+    revwalk
+        .set_sorting(Sort::TIME | Sort::TOPOLOGICAL)
+        .map_err(internal_git_error)?;
+
+    for oid_result in revwalk {
+        let oid = oid_result.map_err(internal_git_error)?;
+        let commit = repo.find_commit(oid).map_err(internal_git_error)?;
+        let commit_tree = commit.tree().map_err(internal_git_error)?;
+
+        let mut options = DiffOptions::new();
+        let diff = if commit.parent_count() > 0 {
+            let parent = commit.parent(0).map_err(internal_git_error)?;
+            let parent_tree = parent.tree().map_err(internal_git_error)?;
+            repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), Some(&mut options))
+                .map_err(internal_git_error)?
+        } else {
+            repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut options))
+                .map_err(internal_git_error)?
+        };
+
+        let mut matched_hunks = Vec::<FunctionDiffHunk>::new();
+        for delta_index in 0..diff.deltas().len() {
+            let Some(delta) = diff.get_delta(delta_index) else {
+                continue;
+            };
+
+            let path_matches = pick_delta_path(&delta)
+                .map(|path| normalize_path(&path) == normalize_path(&file_path))
+                .unwrap_or(false);
+            if !path_matches {
+                continue;
+            }
+
+            let Some(patch) = git2::Patch::from_diff(&diff, delta_index).map_err(internal_git_error)? else {
+                continue;
+            };
+
+            for hunk_index in 0..patch.num_hunks() {
+                let (hunk, line_count) = patch.hunk(hunk_index).map_err(internal_git_error)?;
+                let header = String::from_utf8_lossy(hunk.header()).trim().to_string();
+
+                let mut patch_lines = String::new();
+                let mut contains_function_name = header.contains(&function_name);
+                for line_index in 0..line_count {
+                    let line_in_hunk = patch
+                        .line_in_hunk(hunk_index, line_index)
+                        .map_err(internal_git_error)?;
+                    let content = String::from_utf8_lossy(line_in_hunk.content()).to_string();
+                    if content.contains(&function_name) {
+                        contains_function_name = true;
+                    }
+                    patch_lines.push(line_in_hunk.origin());
+                    patch_lines.push_str(&content);
+                }
+
+                let overlaps_span = function_span
+                    .map(|(start, end)| {
+                        let old_start = hunk.old_start().max(1) as usize;
+                        let old_end = old_start + hunk.old_lines().max(1) as usize - 1;
+                        let new_start = hunk.new_start().max(1) as usize;
+                        let new_end = new_start + hunk.new_lines().max(1) as usize - 1;
+                        ranges_overlap(start, end, old_start, old_end)
+                            || ranges_overlap(start, end, new_start, new_end)
+                    })
+                    .unwrap_or(false);
+
+                if contains_function_name || overlaps_span {
+                    matched_hunks.push(FunctionDiffHunk {
+                        header,
+                        patch: truncate_text(patch_lines.trim(), 2200),
+                    });
+                }
+            }
+        }
+
+        if !matched_hunks.is_empty() {
+            result.changes.push(FunctionChangeItem {
+                commit_id: commit.id().to_string(),
+                message: commit.summary().unwrap_or("<no message>").to_string(),
+                author: commit.author().name().unwrap_or("<unknown>").to_string(),
+                timestamp: commit.time().seconds(),
+                hunks: matched_hunks,
+            });
+        }
+
+        if result.changes.len() >= 25 {
+            break;
+        }
+    }
+
+    result.commit_count = result.changes.len();
+    Ok(result)
+}
+
+fn pick_delta_path(delta: &git2::DiffDelta<'_>) -> Option<String> {
+    delta
+        .new_file()
+        .path()
+        .or_else(|| delta.old_file().path())
+        .map(|path| path.to_string_lossy().to_string())
+}
+
+fn normalize_path(input: &str) -> String {
+    input.replace('\\', "/")
+}
+
+fn ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usize) -> bool {
+    a_start <= b_end && b_start <= a_end
+}
+
+fn truncate_text(input: &str, max_len: usize) -> String {
+    if input.len() <= max_len {
+        return input.to_string();
+    }
+
+    let mut output = input[..max_len].to_string();
+    output.push_str("\n...<truncated>");
+    output
+}
+
+fn find_function_span_in_file(file_path: &Path, function_name: &str) -> std::io::Result<Option<(usize, usize)>> {
+    let content = fs::read_to_string(file_path)?;
+    let fn_decl_re = regex::Regex::new(
+        r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+    )
+    .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+
+    let mut brace_depth = 0i32;
+    let mut pending_name: Option<String> = None;
+    let mut active_name: Option<String> = None;
+    let mut active_start_depth = 0i32;
+    let mut active_start_line = 0usize;
+
+    for (index, raw_line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.split("//").next().unwrap_or(raw_line);
+
+        if let Some(caps) = fn_decl_re.captures(line) {
+            if let Some(name_match) = caps.get(1) {
+                pending_name = Some(name_match.as_str().to_string());
+            }
+        }
+
+        let open_count = line.chars().filter(|ch| *ch == '{').count() as i32;
+        let close_count = line.chars().filter(|ch| *ch == '}').count() as i32;
+
+        if let Some(name) = pending_name.clone() {
+            if open_count > 0 {
+                active_name = Some(name);
+                active_start_depth = brace_depth;
+                active_start_line = line_number;
+                pending_name = None;
+            }
+        }
+
+        brace_depth += open_count - close_count;
+
+        if let Some(name) = active_name.clone() {
+            if brace_depth <= active_start_depth {
+                if name == function_name {
+                    return Ok(Some((active_start_line, line_number)));
+                }
+                active_name = None;
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn internal_git_error(err: git2::Error) -> (StatusCode, String) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!("Git query failed: {}", err),
+    )
 }
 
 fn internal_db_error(err: rusqlite::Error) -> (StatusCode, String) {
