@@ -272,9 +272,10 @@
           <span class="chip">File</span>
           <span class="chip alert">Search hit = red border</span>
           <span class="chip">Edge between hits = yellow</span>
-          <span class="chip">Hotspot: Low=small</span>
-          <span class="chip">Medium=mid</span>
-          <span class="chip">High=large</span>
+          <span class="chip">File heat: Low=small cool</span>
+          <span class="chip">File heat: High=large hot</span>
+          <span class="chip">Function heat: Low=small cool</span>
+          <span class="chip">Function heat: High=large hot</span>
           <span class="chip">2D: readable labels</span>
         </div>
         <div class="kpi"><strong>Nodes:</strong> <span id="nodeCount">0</span></div>
@@ -517,13 +518,39 @@
       return "#c4b5fd";
     }
 
+    function getHeatColor(type, hotspotLevel) {
+      const normalizedType = String(type || "").toLowerCase();
+      const normalizedHotspot = String(hotspotLevel || "").toLowerCase();
+
+      if (normalizedType === "file" || normalizedType.includes("function")) {
+        if (normalizedHotspot === "high") {
+          return "#ef4444";
+        }
+        if (normalizedHotspot === "medium") {
+          return "#f59e0b";
+        }
+      }
+
+      return getNodeColor(type);
+    }
+
     function getNodeSize(type, hotspotLevel) {
       const normalizedType = String(type || "").toLowerCase();
-      if (normalizedType !== "file") {
+      if (normalizedType !== "file" && !normalizedType.includes("function")) {
         return 26;
       }
 
       const normalizedHotspot = String(hotspotLevel || "").toLowerCase();
+      if (normalizedType.includes("function")) {
+        if (normalizedHotspot === "high") {
+          return 38;
+        }
+        if (normalizedHotspot === "medium") {
+          return 30;
+        }
+        return 24;
+      }
+
       if (normalizedHotspot === "high") {
         return 54;
       }
@@ -572,18 +599,33 @@
 
         const nodes = await nodesRes.json();
         const edges = await edgesRes.json();
-        const hotspotRes = await fetch(base + "/query/file-hotspots");
-        const hotspots = hotspotRes.ok ? await hotspotRes.json() : [];
-        const hotspotMap = new Map();
-        hotspots.forEach((item) => {
-          hotspotMap.set(item.file_id, item);
+        const [fileHotspotRes, functionHotspotRes] = await Promise.all([
+          fetch(base + "/query/file-hotspots"),
+          fetch(base + "/query/function-hotspots")
+        ]);
+        const fileHotspots = fileHotspotRes.ok ? await fileHotspotRes.json() : [];
+        const functionHotspots = functionHotspotRes.ok ? await functionHotspotRes.json() : [];
+
+        const fileHotspotMap = new Map();
+        fileHotspots.forEach((item) => {
+          fileHotspotMap.set(item.file_id, item);
+        });
+        const functionHotspotMap = new Map();
+        functionHotspots.forEach((item) => {
+          functionHotspotMap.set(item.function_id, item);
         });
 
         nodes.forEach((node) => {
-          if (String(node.type || "") === "File" && hotspotMap.has(node.id)) {
-            const info = hotspotMap.get(node.id);
+          if (String(node.type || "") === "File" && fileHotspotMap.has(node.id)) {
+            const info = fileHotspotMap.get(node.id);
             node.hotspot = info.hotspot;
             node.churn_score = info.churn_score;
+          } else if (String(node.type || "") === "Function" && functionHotspotMap.has(node.id)) {
+            const info = functionHotspotMap.get(node.id);
+            node.hotspot = info.hotspot;
+            node.churn_score = info.churn_score;
+            node.call_degree = info.call_degree;
+            node.file_commit_count = info.file_commit_count;
           }
         });
 
@@ -597,9 +639,9 @@
         render2d(visibleGraph.nodes, visibleGraph.edges);
         clearSearchHighlights();
         if (state.showNonCodeFiles) {
-          setStatus("Loaded graph successfully. Showing code and non-code files.");
+          setStatus("Loaded graph successfully. Heatmap active for File/Function nodes.");
         } else {
-          setStatus("Loaded graph successfully. Source Code Focus is ON (non-code files hidden).");
+          setStatus("Loaded graph successfully. Source Code Focus ON + heatmap active for File/Function nodes.");
         }
       } catch (err) {
         setStatus("Failed to load graph: " + err.message);
@@ -816,7 +858,7 @@
       });
 
       state.cy.nodes().forEach((node) => {
-        node.style("background-color", getNodeColor(node.data("type")));
+        node.style("background-color", getHeatColor(node.data("type"), node.data("hotspot")));
       });
 
       state.cy.on("tap", "node", (event) => {

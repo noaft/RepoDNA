@@ -80,6 +80,24 @@ pub struct FileHotspotResponse {
 }
 
 #[derive(Serialize)]
+pub struct FunctionHotspotResponse {
+    pub function_id: String,
+    pub function_name: String,
+    pub file: String,
+    pub file_commit_count: i64,
+    pub call_degree: i64,
+    pub churn_score: i64,
+    pub hotspot: String,
+}
+
+#[derive(Serialize)]
+pub struct CoChangeResult {
+    pub file_id: String,
+    pub file_name: String,
+    pub co_change_count: i64,
+}
+
+#[derive(Serialize)]
 pub struct AuthorInsights {
     pub commit_count: i64,
     pub modified_files_count: i64,
@@ -114,6 +132,8 @@ pub fn router(db_path: PathBuf) -> Router {
         .route("/query/author-ownership/{id}", get(get_author_ownership))
         .route("/query/top-owner/{id}", get(get_top_owner))
         .route("/query/file-hotspots", get(get_file_hotspots))
+        .route("/query/function-hotspots", get(get_function_hotspots))
+        .route("/query/co-change/{file}", get(get_co_change_files))
         .route("/health", get(health))
         .layer(cors)
         .with_state(GraphApiState { db_path })
@@ -592,6 +612,170 @@ async fn get_file_hotspots(
     }
 
     Ok(Json(output))
+}
+
+async fn get_function_hotspots(
+    State(state): State<GraphApiState>,
+) -> Result<Json<Vec<FunctionHotspotResponse>>, (StatusCode, String)> {
+    let conn = open_connection(&state.db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT entity_id, value
+             FROM metadata
+             WHERE entity_type = 'Function' AND key = 'hotspot'",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            let function_id: String = row.get(0)?;
+            let raw: String = row.get(1)?;
+            Ok((function_id, raw))
+        })
+        .map_err(internal_db_error)?;
+
+    let mut output = Vec::new();
+    for row in rows {
+        let (function_id, raw) = row.map_err(internal_db_error)?;
+        let parsed: Value = serde_json::from_str(&raw).map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid function hotspot metadata: {}", err),
+            )
+        })?;
+
+        output.push(FunctionHotspotResponse {
+            function_id,
+            function_name: parsed
+                .get("function")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>")
+                .to_string(),
+            file: parsed
+                .get("file")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            file_commit_count: parsed
+                .get("file_commit_count")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            call_degree: parsed
+                .get("call_degree")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            churn_score: parsed
+                .get("churn_score")
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            hotspot: parsed
+                .get("hotspot")
+                .and_then(Value::as_str)
+                .unwrap_or("Low")
+                .to_string(),
+        });
+    }
+
+    output.sort_by(|left, right| {
+        right
+            .churn_score
+            .cmp(&left.churn_score)
+            .then_with(|| left.function_name.cmp(&right.function_name))
+    });
+
+    Ok(Json(output))
+}
+
+async fn get_co_change_files(
+    State(state): State<GraphApiState>,
+    AxumPath(file): AxumPath<String>,
+) -> Result<Json<Vec<CoChangeResult>>, (StatusCode, String)> {
+    let conn = open_connection(&state.db_path)?;
+    let Some(file_id) = resolve_file_selector_to_id(&conn, &file)? else {
+        return Ok(Json(Vec::new()));
+    };
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT
+                CASE WHEN e.source = ?1 THEN e.target ELSE e.source END AS other_file_id,
+                n.name,
+                CAST(COALESCE(json_extract(e.metadata, '$.count'), 0) AS INTEGER) AS co_change_count
+             FROM edges e
+             JOIN nodes n ON n.id = CASE WHEN e.source = ?1 THEN e.target ELSE e.source END
+             WHERE e.relation = 'CO_CHANGE'
+               AND (e.source = ?1 OR e.target = ?1)
+               AND n.type = 'File'
+             ORDER BY co_change_count DESC, n.name ASC",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map(params![file_id], |row| {
+            Ok(CoChangeResult {
+                file_id: row.get(0)?,
+                file_name: row.get(1)?,
+                co_change_count: row.get(2)?,
+            })
+        })
+        .map_err(internal_db_error)?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(internal_db_error)?);
+    }
+
+    Ok(Json(items))
+}
+
+fn resolve_file_selector_to_id(
+    conn: &Connection,
+    selector: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let trimmed = selector.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let by_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM nodes WHERE type = 'File' AND id = ?1 LIMIT 1",
+            params![trimmed],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal_db_error)?;
+    if by_id.is_some() {
+        return Ok(by_id);
+    }
+
+    let exact_name: Option<String> = conn
+        .query_row(
+            "SELECT id FROM nodes WHERE type = 'File' AND name = ?1 LIMIT 1",
+            params![trimmed],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal_db_error)?;
+    if exact_name.is_some() {
+        return Ok(exact_name);
+    }
+
+    let suffix = format!("%/{}", trimmed);
+    let by_suffix: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM nodes
+             WHERE type = 'File' AND name LIKE ?1
+             ORDER BY LENGTH(name) ASC, name ASC
+             LIMIT 1",
+            params![suffix],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal_db_error)?;
+
+    Ok(by_suffix)
 }
 
 fn get_author_ownership_from_conn(
