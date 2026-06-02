@@ -156,16 +156,27 @@ impl RustSymbolNode {
         }
     }
 
-    fn new_function(file_path: &str, symbol_name: &str, start_line: usize, end_line: usize) -> Self {
+    fn new_function_with_status(
+        file_path: &str,
+        symbol_name: &str,
+        start_line: usize,
+        end_line: usize,
+        is_active: bool,
+    ) -> Self {
         let node_type = RustSymbolKind::Function.as_node_type().to_string();
-        let symbol_id = rust_symbol_id(&node_type, file_path, symbol_name);
+        let symbol_id = rust_function_symbol_id(file_path, symbol_name, start_line);
+        let symbol_key = function_symbol_key(file_path, symbol_name, start_line);
 
         let metadata = json!({
             "file": file_path,
+            "symbol_key": symbol_key,
             "line": start_line,
             "start_line": start_line,
             "end_line": end_line,
-            "rust_symbol_kind": RustSymbolKind::Function.as_relation_hint()
+            "rust_symbol_kind": RustSymbolKind::Function.as_relation_hint(),
+            "is_active": is_active,
+            "deleted": !is_active,
+            "delete": !is_active
         })
         .to_string();
 
@@ -221,22 +232,42 @@ impl AuthorNode {
 
 impl FileNode {
     pub fn from_path(path: &str) -> Self {
+        Self::from_path_with_status(path, true)
+    }
+
+    pub fn from_path_with_status(path: &str, is_active: bool) -> Self {
         Self {
             id: format!("file_{}", sanitize_id(path)),
             node_type: "File".to_string(),
             name: path.to_string(),
-            metadata: json!({ "path": path }).to_string(),
+            metadata: json!({
+                "path": path,
+                "is_active": is_active,
+                "deleted": !is_active,
+                "delete": !is_active
+            })
+            .to_string(),
         }
     }
 }
 
 impl DirectoryNode {
     pub fn from_path(path: &str) -> Self {
+        Self::from_path_with_status(path, true)
+    }
+
+    pub fn from_path_with_status(path: &str, is_active: bool) -> Self {
         Self {
             id: format!("directory_{}", sanitize_id(path)),
             node_type: "Directory".to_string(),
             name: path.to_string(),
-            metadata: json!({ "path": path }).to_string(),
+            metadata: json!({
+                "path": path,
+                "is_active": is_active,
+                "deleted": !is_active,
+                "delete": !is_active
+            })
+            .to_string(),
         }
     }
 }
@@ -265,15 +296,45 @@ impl CommitRepository {
     }
 
     pub fn upsert_file_node(&self, node: &FileNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+        let rows_affected = self.conn.execute(
+            "INSERT INTO nodes (id, type, name, metadata)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 type = excluded.type,
+                 name = excluded.name,
+                 metadata = excluded.metadata",
+            params![node.id, node.node_type, node.name, node.metadata],
+        )?;
+
+        Ok(rows_affected > 0)
     }
 
     pub fn upsert_directory_node(&self, node: &DirectoryNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+        let rows_affected = self.conn.execute(
+            "INSERT INTO nodes (id, type, name, metadata)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 type = excluded.type,
+                 name = excluded.name,
+                 metadata = excluded.metadata",
+            params![node.id, node.node_type, node.name, node.metadata],
+        )?;
+
+        Ok(rows_affected > 0)
     }
 
     fn upsert_symbol_node(&self, node: &RustSymbolNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+        let rows_affected = self.conn.execute(
+            "INSERT INTO nodes (id, type, name, metadata)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 type = excluded.type,
+                 name = excluded.name,
+                 metadata = excluded.metadata",
+            params![node.id, node.node_type, node.name, node.metadata],
+        )?;
+
+        Ok(rows_affected > 0)
     }
 
     pub fn upsert_edge(&self, edge: &EdgeRecord) -> rusqlite::Result<bool> {
@@ -545,6 +606,47 @@ impl CommitRepository {
         Ok(files)
     }
 
+    fn get_all_directories(&self) -> rusqlite::Result<Vec<FileRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name FROM nodes WHERE type = 'Directory' ORDER BY name")?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(FileRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })?;
+
+        let mut directories = Vec::new();
+        for row in rows {
+            directories.push(row?);
+        }
+
+        Ok(directories)
+    }
+
+    fn update_file_activity_statuses(&self, active_paths: &HashSet<String>) -> rusqlite::Result<()> {
+        let files = self.get_all_files()?;
+        for file in files {
+            let file_node = FileNode::from_path_with_status(&file.name, active_paths.contains(&file.name));
+            let _ = self.upsert_file_node(&file_node)?;
+        }
+
+        Ok(())
+    }
+
+    fn update_directory_activity_statuses(&self, active_paths: &HashSet<String>) -> rusqlite::Result<()> {
+        let directories = self.get_all_directories()?;
+        for directory in directories {
+            let directory_node =
+                DirectoryNode::from_path_with_status(&directory.name, active_paths.contains(&directory.name));
+            let _ = self.upsert_directory_node(&directory_node)?;
+        }
+
+        Ok(())
+    }
+
     fn get_all_functions(&self) -> rusqlite::Result<Vec<NodeRecord>> {
         let mut stmt = self
             .conn
@@ -564,6 +666,22 @@ impl CommitRepository {
         }
 
         Ok(functions)
+    }
+
+    fn update_function_activity_statuses(&self, active_function_ids: &HashSet<String>) -> rusqlite::Result<()> {
+        let functions = self.get_all_functions()?;
+        for function in functions {
+            let is_active = active_function_ids.contains(&function.id);
+            let updated = RustSymbolNode {
+                id: function.id,
+                node_type: "Function".to_string(),
+                name: function.name,
+                metadata: set_function_status_in_metadata(&function.metadata, is_active),
+            };
+            let _ = self.upsert_symbol_node(&updated)?;
+        }
+
+        Ok(())
     }
 
     fn get_total_commits_for_file(&self, file_id: &str) -> rusqlite::Result<i64> {
@@ -831,6 +949,23 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     }
 
     if let Some(workdir) = repo.workdir() {
+        let repo_files = collect_repo_files(workdir)?;
+        let current_file_paths = repo_files
+            .iter()
+            .map(|path| {
+                path.strip_prefix(workdir)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect::<HashSet<_>>();
+        let current_directory_paths = repo_files
+            .iter()
+            .flat_map(|path| collect_parent_directory_paths(path.strip_prefix(workdir).unwrap_or(path)))
+            .collect::<HashSet<_>>();
+        repository.update_file_activity_statuses(&current_file_paths)?;
+        repository.update_directory_activity_statuses(&current_directory_paths)?;
+
         let rust_files = collect_rust_source_files(workdir)?;
         let mut rust_snapshots = Vec::<RustFileSnapshot>::new();
 
@@ -911,6 +1046,12 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                 }
             }
         }
+
+        let active_function_ids = rust_snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.function_spans.iter().map(|span| span.id.clone()))
+            .collect::<HashSet<_>>();
+        repository.update_function_activity_statuses(&active_function_ids)?;
 
         modified_function_edges_inserted =
             index_commit_function_relationships(&repo, &repository, &rust_snapshots)?;
@@ -1057,6 +1198,15 @@ fn rust_symbol_id(node_type: &str, file_path: &str, symbol_name: &str) -> String
     )
 }
 
+fn rust_function_symbol_id(file_path: &str, symbol_name: &str, start_line: usize) -> String {
+    format!(
+        "function_{}_{}_l{}",
+        sanitize_id(file_path),
+        sanitize_id(symbol_name),
+        start_line
+    )
+}
+
 fn count_braces(line: &str) -> (i32, i32) {
     let mut open_count = 0i32;
     let mut close_count = 0i32;
@@ -1092,15 +1242,29 @@ fn extract_file_path_from_metadata(metadata: &str) -> String {
         .unwrap_or_default()
 }
 
+fn set_function_status_in_metadata(metadata: &str, is_active: bool) -> String {
+    let mut parsed = serde_json::from_str::<serde_json::Value>(metadata).unwrap_or_else(|_| json!({}));
+    if let Some(object) = parsed.as_object_mut() {
+        object.insert("is_active".to_string(), json!(is_active));
+        object.insert("deleted".to_string(), json!(!is_active));
+        object.insert("delete".to_string(), json!(!is_active));
+    }
+    parsed.to_string()
+}
+
 fn function_file_key(file_path: &str, function_name: &str) -> String {
     format!("{}::{}", file_path, function_name)
 }
 
+fn function_symbol_key(file_path: &str, function_name: &str, start_line: usize) -> String {
+    format!("{}::{}::L{}", file_path, function_name, start_line)
+}
+
 fn build_function_indexes(
     snapshots: &[RustFileSnapshot],
-) -> (HashMap<String, Vec<String>>, HashMap<String, String>) {
+) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
     let mut by_name = HashMap::<String, Vec<String>>::new();
-    let mut by_file_and_name = HashMap::<String, String>::new();
+    let mut by_file_and_name = HashMap::<String, Vec<String>>::new();
 
     for snapshot in snapshots {
         for symbol in &snapshot.symbols {
@@ -1113,10 +1277,10 @@ fn build_function_indexes(
                 .or_default()
                 .push(symbol.id.clone());
 
-            by_file_and_name.insert(
-                function_file_key(&snapshot.file_path, &symbol.name),
-                symbol.id.clone(),
-            );
+            by_file_and_name
+                .entry(function_file_key(&snapshot.file_path, &symbol.name))
+                .or_default()
+                .push(symbol.id.clone());
         }
     }
 
@@ -1138,7 +1302,7 @@ fn extract_rust_function_calls(
     file_path: &str,
     content: &str,
     function_ids_by_name: &HashMap<String, Vec<String>>,
-    function_id_by_file_and_name: &HashMap<String, String>,
+    function_id_by_file_and_name: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<EdgeRecord>, regex::Error> {
     let fn_decl_re = Regex::new(
         r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
@@ -1178,7 +1342,11 @@ fn extract_rust_function_calls(
 
         if let Some(current_frame) = function_stack.last() {
             let source_key = function_file_key(file_path, &current_frame.function_name);
-            if let Some(source_id) = function_id_by_file_and_name.get(&source_key) {
+            if let Some(source_ids) = function_id_by_file_and_name.get(&source_key) {
+                if source_ids.len() != 1 {
+                    continue;
+                }
+                let source_id = &source_ids[0];
                 for caps in call_re.captures_iter(line) {
                     if let Some(name_match) = caps.get(1) {
                         let callee_name = name_match.as_str();
@@ -1269,7 +1437,34 @@ fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<Direct
     (directories, contains_edges)
 }
 
+fn collect_parent_directory_paths(file_path: &Path) -> Vec<String> {
+    let normalized = file_path.to_string_lossy().replace('\\', "/");
+    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut directories = Vec::new();
+    let mut prefix = String::new();
+    for part in &parts[0..parts.len() - 1] {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        directories.push(prefix.clone());
+    }
+
+    directories
+}
+
 fn collect_rust_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+    Ok(collect_repo_files(root)?
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect())
+}
+
+fn collect_repo_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     fn walk(dir: &Path, acc: &mut Vec<PathBuf>) -> io::Result<()> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -1281,7 +1476,7 @@ fn collect_rust_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
                     continue;
                 }
                 walk(&path, acc)?;
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            } else {
                 acc.push(path);
             }
         }
@@ -1305,11 +1500,12 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
     let mut seen = HashSet::<String>::new();
 
     for function in extract_rust_function_spans(file_path, content)? {
-        let symbol = RustSymbolNode::new_function(
+        let symbol = RustSymbolNode::new_function_with_status(
             &function.file_path,
             &function.name,
             function.start_line,
             function.end_line,
+            true,
         );
         if seen.insert(symbol.id.clone()) {
             symbols.push(symbol);
@@ -1416,7 +1612,7 @@ fn extract_rust_function_spans(
                 let current = function_stack.pop().expect("frame exists");
                 let start_line = function_start_lines.pop().unwrap_or(line_number);
                 functions.push(FunctionSpan {
-                    id: rust_symbol_id("Function", file_path, &current.function_name),
+                    id: rust_function_symbol_id(file_path, &current.function_name, start_line),
                     name: current.function_name,
                     file_path: file_path.to_string(),
                     start_line,
@@ -1539,6 +1735,9 @@ fn index_commit_function_edges_for_commit(
             Vec::new()
         };
 
+        upsert_historical_function_nodes(repository, &old_functions, current_function_ids)?;
+        upsert_historical_function_nodes(repository, &new_functions, current_function_ids)?;
+
         let changed_ranges = extract_changed_line_ranges(&diff, delta_index)?;
 
         if changed_ranges.full_file {
@@ -1588,6 +1787,36 @@ fn index_commit_function_edges_for_commit(
     }
 
     Ok(inserted)
+}
+
+fn upsert_historical_function_nodes(
+    repository: &CommitRepository,
+    functions: &[FunctionSpan],
+    current_function_ids: &HashSet<String>,
+) -> rusqlite::Result<()> {
+    for function in functions {
+        let is_active = current_function_ids.contains(&function.id);
+        let node = RustSymbolNode {
+            id: function.id.clone(),
+            node_type: "Function".to_string(),
+            name: function.name.clone(),
+            metadata: set_function_status_in_metadata(
+                &json!({
+                    "file": function.file_path,
+                    "symbol_key": function_symbol_key(&function.file_path, &function.name, function.start_line),
+                    "line": function.start_line,
+                    "start_line": function.start_line,
+                    "end_line": function.end_line,
+                    "rust_symbol_kind": "function"
+                })
+                .to_string(),
+                is_active,
+            ),
+        };
+        let _ = repository.upsert_symbol_node(&node)?;
+    }
+
+    Ok(())
 }
 
 struct ChangedLineRanges {
@@ -1863,8 +2092,8 @@ fn a() {
         assert!(report.call_edges_inserted >= 1);
 
         let db = Connection::open(report.db_path).expect("db should open");
-        let a_id = rust_symbol_id("Function", "src/call_graph.rs", "a");
-        let b_id = rust_symbol_id("Function", "src/call_graph.rs", "b");
+        let a_id = rust_function_symbol_id("src/call_graph.rs", "a", 4);
+        let b_id = rust_function_symbol_id("src/call_graph.rs", "b", 2);
 
         let call_edge_count: i64 = db
             .query_row(
@@ -1913,8 +2142,8 @@ fn a() {
         assert!(report.call_edges_inserted >= 1);
 
         let db = Connection::open(report.db_path).expect("db should open");
-        let main_id = rust_symbol_id("Function", "src/main.rs", "main");
-        let run_id = rust_symbol_id("Function", "src/helper.rs", "run");
+        let main_id = rust_function_symbol_id("src/main.rs", "main", 3);
+        let run_id = rust_function_symbol_id("src/helper.rs", "run", 1);
 
         let cross_file_call_count: i64 = db
             .query_row(
@@ -1925,6 +2154,44 @@ fn a() {
             .expect("cross-file calls edge count should succeed");
 
         assert_eq!(cross_file_call_count, 1);
+    }
+
+    #[test]
+    fn build_graph_keeps_same_named_functions_distinct_in_db() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["initial"]);
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+
+        let rust_source = r#"
+struct A;
+struct B;
+
+impl A {
+    fn run(&self) {}
+}
+
+impl B {
+    fn run(&self) {}
+}
+"#;
+
+        std::fs::write(src_dir.join("dup.rs"), rust_source).expect("rust file should be written");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let run_a_id = rust_function_symbol_id("src/dup.rs", "run", 6);
+        let run_b_id = rust_function_symbol_id("src/dup.rs", "run", 10);
+
+        let run_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE id IN (?1, ?2) AND type = 'Function'",
+                params![run_a_id, run_b_id],
+                |row| row.get(0),
+            )
+            .expect("distinct same-name function count should succeed");
+
+        assert_eq!(run_count, 2);
     }
 
     #[test]
@@ -2020,8 +2287,8 @@ fn a() {
             .expect("build should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
 
-        let allocate_id = rust_symbol_id("Function", "src/lib.rs", "allocate");
-        let evict_id = rust_symbol_id("Function", "src/lib.rs", "evict");
+        let allocate_id = rust_function_symbol_id("src/lib.rs", "allocate", 1);
+        let evict_id = rust_function_symbol_id("src/lib.rs", "evict", 5);
         let touch_commit_id = head_commit_node_id(&repo);
 
         let allocate_edge_count: i64 = db
@@ -2142,7 +2409,7 @@ fn a() {
             .expect("build should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
         let rename_commit_id = head_commit_node_id(&repo);
-        let reserve_id = rust_symbol_id("Function", "src/lib.rs", "reserve");
+        let reserve_id = rust_function_symbol_id("src/lib.rs", "reserve", 1);
 
         let reserve_edge_count: i64 = db
             .query_row(
@@ -2181,6 +2448,107 @@ fn a() {
             .expect("modified function count should succeed");
 
         assert_eq!(modified_functions, 0);
+    }
+
+    #[test]
+    fn build_graph_keeps_deleted_function_nodes_as_inactive() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-functions",
+            &[("src/lib.rs", "fn allocate() {\n    let _x = 1;\n}\n\nfn evict() {\n    let _y = 2;\n}\n")],
+        );
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "delete-allocate",
+            &[("src/lib.rs", "fn evict() {\n    let _y = 2;\n}\n")],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let allocate_id = rust_function_symbol_id("src/lib.rs", "allocate", 1);
+
+        let metadata_raw: String = db
+            .query_row(
+                "SELECT metadata FROM nodes WHERE id = ?1",
+                params![allocate_id],
+                |row| row.get(0),
+            )
+            .expect("deleted function node should still exist");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata_raw).expect("metadata should parse");
+        assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn build_graph_keeps_deleted_file_nodes_as_inactive() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-temp-file",
+            &[("src/temp.rs", "fn temp() {\n    let _x = 1;\n}\n")],
+        );
+        delete_and_commit_files(&repo, temp_dir.path(), "delete-temp-file", &["src/temp.rs"]);
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let temp_file_id = FileNode::from_path("src/temp.rs").id;
+
+        let metadata_raw: String = db
+            .query_row(
+                "SELECT metadata FROM nodes WHERE id = ?1",
+                params![temp_file_id],
+                |row| row.get(0),
+            )
+            .expect("deleted file node should still exist");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata_raw).expect("metadata should parse");
+        assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn build_graph_keeps_deleted_directory_nodes_as_inactive() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-nested-file",
+            &[("test/function_diff_overlap/case.rs", "fn temp() {\n    let _x = 1;\n}\n")],
+        );
+        delete_and_commit_files(&repo, temp_dir.path(), "delete-nested-file", &["test/function_diff_overlap/case.rs"]);
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let directory_id = DirectoryNode::from_path("test/function_diff_overlap").id;
+
+        let metadata_raw: String = db
+            .query_row(
+                "SELECT metadata FROM nodes WHERE id = ?1",
+                params![directory_id],
+                |row| row.get(0),
+            )
+            .expect("deleted directory node should still exist");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&metadata_raw).expect("metadata should parse");
+        assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
+        assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
     }
 
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {
@@ -2292,5 +2660,44 @@ fn a() {
             .target()
             .expect("head target should exist");
         format!("commit_{}", head)
+    }
+
+    fn delete_and_commit_files(repo: &Repository, root: &Path, message: &str, files: &[&str]) {
+        for relative_path in files {
+            let file_path = root.join(relative_path);
+            if file_path.exists() {
+                std::fs::remove_file(&file_path).expect("file should be removed");
+            }
+        }
+
+        let mut git_index = repo.index().expect("index should be available");
+        for relative_path in files {
+            git_index
+                .remove_path(Path::new(relative_path))
+                .expect("path should be removed from index");
+        }
+        git_index.write().expect("index write should succeed");
+
+        let tree_id = git_index.write_tree().expect("tree id should be created");
+        let tree = repo.find_tree(tree_id).expect("tree should be found");
+        let signature =
+            Signature::now("Test User", "test@example.com").expect("signature should exist");
+
+        let parent_commit = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .expect("parent commit should exist");
+
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &[&parent_commit],
+        )
+        .expect("delete commit should succeed");
     }
 }

@@ -530,6 +530,15 @@
       return parts[parts.length - 1] || normalized;
     }
 
+    function dirname(pathValue) {
+      const normalized = String(pathValue || "").replace(/\\/g, "/");
+      const parts = normalized.split("/");
+      if (parts.length <= 1) {
+        return "";
+      }
+      return parts.slice(0, -1).join("/");
+    }
+
     function getFileExtension(pathValue) {
       const name = basename(pathValue).toLowerCase();
       const lastDot = name.lastIndexOf(".");
@@ -591,15 +600,45 @@
     function getDisplayLabel(node) {
       const type = String(node.type || "").toLowerCase();
       const raw = node.name || node.id;
-      const baseValue = (type === "file" || type === "directory") ? basename(raw) : raw;
-      return shortenLabel(baseValue, 20);
+      const metadata = parseMetadata(node.metadata);
+
+      if (type === "file") {
+        const fileName = basename(raw);
+        const parent = dirname(raw);
+        return shortenLabel(parent ? `${fileName} @ ${basename(parent) || parent}` : fileName, 26);
+      }
+
+      if (type === "directory") {
+        return shortenLabel(raw, 26);
+      }
+
+      if (type.includes("function")) {
+        const filePath = metadata && typeof metadata === "object" ? (metadata.file || "") : "";
+        const fileName = filePath ? basename(filePath) : "";
+        return shortenLabel(fileName ? `${raw} @ ${fileName}` : raw, 28);
+      }
+
+      return shortenLabel(raw, 20);
+    }
+
+    function getFullNodeLabel(node) {
+      const type = String(node.type || "").toLowerCase();
+      const raw = node.name || node.id;
+      const metadata = parseMetadata(node.metadata);
+
+      if (type.includes("function")) {
+        const filePath = metadata && typeof metadata === "object" ? (metadata.file || "") : "";
+        return filePath ? `${raw} @ ${filePath}` : raw;
+      }
+
+      if (type === "file") {
+        return raw;
+      }
+
+      return raw;
     }
 
     function getHoverText(nodeData) {
-      const type = String(nodeData.type || "").toLowerCase();
-      if (type === "file") {
-        return nodeData.fullLabel || nodeData.label || nodeData.id;
-      }
       return nodeData.fullLabel || nodeData.label || nodeData.id;
     }
 
@@ -868,6 +907,26 @@
       }
     }
 
+    function parseMetadata(raw) {
+      if (!raw) {
+        return null;
+      }
+      try {
+        return typeof raw === "string" ? JSON.parse(raw) : raw;
+      } catch (_err) {
+        return null;
+      }
+    }
+
+    function isDeletedNode(node) {
+      const metadata = parseMetadata(node.metadata);
+      if (!metadata || typeof metadata !== "object") {
+        return false;
+      }
+
+      return metadata.delete === true || metadata.deleted === true || metadata.is_active === false;
+    }
+
     function getNodeColor(type) {
       const normalized = String(type || "").toLowerCase();
       if (normalized === "commit") {
@@ -897,9 +956,14 @@
       return "#c4b5fd";
     }
 
-    function getHeatColor(type, hotspotLevel) {
+    function getHeatColor(type, hotspotLevel, metadata) {
       const normalizedType = String(type || "").toLowerCase();
       const normalizedHotspot = String(hotspotLevel || "").toLowerCase();
+      const parsedMetadata = parseMetadata(metadata);
+
+      if (parsedMetadata && (parsedMetadata.delete === true || parsedMetadata.deleted === true || parsedMetadata.is_active === false)) {
+        return "#9ca3af";
+      }
 
       if (normalizedType === "file" || normalizedType.includes("function")) {
         if (normalizedHotspot === "high") {
@@ -954,7 +1018,7 @@
         nodes: nodes.map((n) => ({
           id: n.id,
           label: getDisplayLabel(n),
-          fullLabel: n.name || n.id,
+          fullLabel: getFullNodeLabel(n),
           type: n.type || "Unknown",
           metadata: n.metadata || null
         })),
@@ -1004,7 +1068,7 @@
             node.hotspot = info.hotspot;
             node.churn_score = info.churn_score;
             node.call_degree = info.call_degree;
-            node.file_commit_count = info.file_commit_count;
+            node.function_commit_count = info.function_commit_count;
           }
         });
 
@@ -1056,6 +1120,9 @@
         if (insights.file_insights) {
           lines.push("");
           lines.push(`Commits touched: ${insights.file_insights.commit_count}`);
+          if (isDeletedNode(insights.node)) {
+            lines.push("File status: Deleted");
+          }
           if (insights.file_insights.hotspot) {
             lines.push(`Hotspot: ${insights.file_insights.hotspot}`);
           }
@@ -1090,7 +1157,16 @@
           lines.push("");
           lines.push(`Function file: ${insights.function_insights.file}`);
           lines.push(`Function line: ${insights.function_insights.line}`);
+          if (isDeletedNode(insights.node)) {
+            lines.push("Function status: Deleted");
+          }
           lines.push(`Function changes found: ${insights.function_insights.commit_count}`);
+          if (Array.isArray(insights.function_insights.modifying_authors) && insights.function_insights.modifying_authors.length > 0) {
+            lines.push("Modifying authors:");
+            insights.function_insights.modifying_authors.slice(0, 5).forEach((entry) => {
+              lines.push(`- ${entry.author} (${entry.commit_count} commits)`);
+            });
+          }
 
           if (Array.isArray(insights.function_insights.changes) && insights.function_insights.changes.length > 0) {
             state.functionCommitChanges = insights.function_insights.changes;
@@ -1187,7 +1263,7 @@
           data: {
             id: n.id,
             label: getDisplayLabel(n),
-            fullLabel: n.name || n.id,
+            fullLabel: getFullNodeLabel(n),
             type: n.type || "Unknown",
             metadata: n.metadata || "",
             hotspot: n.hotspot || "Low",
@@ -1262,7 +1338,7 @@
       });
 
       state.cy.nodes().forEach((node) => {
-        node.style("background-color", getHeatColor(node.data("type"), node.data("hotspot")));
+        node.style("background-color", getHeatColor(node.data("type"), node.data("hotspot"), node.data("metadata")));
       });
 
       state.cy.on("tap", "node", (event) => {
