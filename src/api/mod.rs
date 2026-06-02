@@ -2,7 +2,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::{Json, Router};
-use git2::{DiffOptions, Repository, Sort};
+use git2::{DiffOptions, Repository};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -85,10 +85,16 @@ pub struct FunctionHotspotResponse {
     pub function_id: String,
     pub function_name: String,
     pub file: String,
-    pub file_commit_count: i64,
+    pub function_commit_count: i64,
     pub call_degree: i64,
     pub churn_score: i64,
     pub hotspot: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FunctionAuthorScore {
+    pub author: String,
+    pub commit_count: i64,
 }
 
 #[derive(Serialize)]
@@ -127,6 +133,7 @@ pub struct FunctionInsights {
     pub function: String,
     pub line: usize,
     pub commit_count: usize,
+    pub modifying_authors: Vec<FunctionAuthorScore>,
     pub changes: Vec<FunctionChangeItem>,
 }
 
@@ -154,6 +161,8 @@ pub fn router(db_path: PathBuf) -> Router {
         .route("/search/bm25", get(search_nodes_bm25))
         .route("/query/commits-by-file/{id}", get(get_commits_by_file))
         .route("/query/files-by-commit/{id}", get(get_files_by_commit))
+        .route("/query/commits-by-function/{id}", get(get_commits_by_function))
+        .route("/query/functions-by-commit/{id}", get(get_functions_by_commit))
         .route("/query/commits-by-author/{id}", get(get_commits_by_author))
         .route("/query/author-ownership/{id}", get(get_author_ownership))
         .route("/query/top-owner/{id}", get(get_top_owner))
@@ -577,6 +586,48 @@ async fn get_commits_by_author(
     Ok(Json(commits))
 }
 
+async fn get_commits_by_function(
+    State(state): State<GraphApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<NodeRecord>>, (StatusCode, String)> {
+    let conn = open_connection(&state.db_path)?;
+    Ok(Json(get_commits_by_function_from_conn(&conn, &id)?))
+}
+
+async fn get_functions_by_commit(
+    State(state): State<GraphApiState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<NodeRecord>>, (StatusCode, String)> {
+    let conn = open_connection(&state.db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.id, n.type, n.name, n.metadata
+             FROM edges e
+             JOIN nodes n ON n.id = e.target
+             WHERE e.relation = 'MODIFIED' AND e.source = ?1 AND n.type = 'Function'
+             ORDER BY n.name",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map(params![id], |row| {
+            Ok(NodeRecord {
+                id: row.get(0)?,
+                r#type: row.get(1)?,
+                name: row.get(2)?,
+                metadata: row.get(3)?,
+            })
+        })
+        .map_err(internal_db_error)?;
+
+    let mut functions = Vec::new();
+    for row in rows {
+        functions.push(row.map_err(internal_db_error)?);
+    }
+
+    Ok(Json(functions))
+}
+
 async fn get_author_ownership(
     State(state): State<GraphApiState>,
     AxumPath(id): AxumPath<String>,
@@ -682,7 +733,7 @@ async fn get_function_hotspots(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            file_commit_count: parsed
+            function_commit_count: parsed
                 .get("file_commit_count")
                 .and_then(Value::as_i64)
                 .unwrap_or(0),
@@ -970,6 +1021,76 @@ fn get_commits_by_file_from_conn(
     Ok(commits)
 }
 
+fn get_commits_by_function_from_conn(
+    conn: &Connection,
+    function_id: &str,
+) -> Result<Vec<NodeRecord>, (StatusCode, String)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT n.id, n.type, n.name, n.metadata
+             FROM edges e
+             JOIN nodes n ON n.id = e.source
+             WHERE e.relation = 'MODIFIED' AND e.target = ?1 AND n.type = 'Commit'
+             ORDER BY CAST(COALESCE(json_extract(n.metadata, '$.timestamp'), 0) AS INTEGER) DESC,
+                      n.name ASC",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map(params![function_id], |row| {
+            Ok(NodeRecord {
+                id: row.get(0)?,
+                r#type: row.get(1)?,
+                name: row.get(2)?,
+                metadata: row.get(3)?,
+            })
+        })
+        .map_err(internal_db_error)?;
+
+    let mut commits = Vec::new();
+    for row in rows {
+        commits.push(row.map_err(internal_db_error)?);
+    }
+
+    Ok(commits)
+}
+
+fn get_function_author_breakdown(
+    conn: &Connection,
+    function_id: &str,
+) -> Result<Vec<FunctionAuthorScore>, (StatusCode, String)> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.name, COUNT(DISTINCT modified.source) AS commit_count
+             FROM edges modified
+             JOIN edges authored ON authored.source = modified.source
+             JOIN nodes a ON a.id = authored.target
+             WHERE modified.relation = 'MODIFIED'
+               AND modified.target = ?1
+               AND authored.relation = 'AUTHORED_BY'
+               AND a.type = 'Author'
+             GROUP BY a.id, a.name
+             ORDER BY commit_count DESC, a.name ASC",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map(params![function_id], |row| {
+            Ok(FunctionAuthorScore {
+                author: row.get(0)?,
+                commit_count: row.get(1)?,
+            })
+        })
+        .map_err(internal_db_error)?;
+
+    let mut authors = Vec::new();
+    for row in rows {
+        authors.push(row.map_err(internal_db_error)?);
+    }
+
+    Ok(authors)
+}
+
 fn get_files_by_author(conn: &Connection, author_id: &str) -> Result<Vec<NodeRecord>, (StatusCode, String)> {
     let mut stmt = conn
         .prepare(
@@ -1151,6 +1272,7 @@ fn get_function_insights(
     db_path: &Path,
     node: &NodeRecord,
 ) -> Result<FunctionInsights, (StatusCode, String)> {
+    let conn = Connection::open(db_path).map_err(internal_db_error)?;
     let metadata_raw = node.metadata.clone().unwrap_or_default();
     let metadata: Value = serde_json::from_str(&metadata_raw).unwrap_or(Value::Null);
 
@@ -1170,6 +1292,7 @@ fn get_function_insights(
         function: function_name.clone(),
         line,
         commit_count: 0,
+        modifying_authors: get_function_author_breakdown(&conn, &node.id)?,
         changes: Vec::new(),
     };
 
@@ -1183,21 +1306,21 @@ fn get_function_insights(
         Err(_) => return Ok(result),
     };
 
-    let mut revwalk = repo.revwalk().map_err(internal_git_error)?;
-    revwalk.push_head().map_err(internal_git_error)?;
-    revwalk
-        .set_sorting(Sort::TIME | Sort::TOPOLOGICAL)
-        .map_err(internal_git_error)?;
-
-    let mut commit_oids = Vec::new();
-    for oid_result in revwalk {
-        commit_oids.push(oid_result.map_err(internal_git_error)?);
-    }
-    commit_oids.reverse();
+    let commits = get_commits_by_function_from_conn(&conn, &node.id)?;
 
     let normalized_file_path = normalize_path(&file_path);
 
-    for oid in commit_oids {
+    for commit_node in commits.iter().take(25) {
+        let commit_oid = commit_node
+            .id
+            .strip_prefix("commit_")
+            .ok_or_else(|| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Invalid commit node id: {}", commit_node.id),
+                )
+            })?;
+        let oid = git2::Oid::from_str(commit_oid).map_err(internal_git_error)?;
         let commit = repo.find_commit(oid).map_err(internal_git_error)?;
         let commit_tree = commit.tree().map_err(internal_git_error)?;
         let parent_tree = if commit.parent_count() > 0 {
@@ -1311,7 +1434,7 @@ fn get_function_insights(
         }
     }
 
-    result.commit_count = result.changes.len();
+    result.commit_count = commits.len();
     Ok(result)
 }
 

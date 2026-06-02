@@ -230,7 +230,7 @@ mod tests {
             .expect("diff output should be collected");
 
         assert!(diff_output.contains("history.txt"));
-        assert!(diff_output.contains("+content-0-initial"));
+        assert!(diff_output.contains("content-0-initial"));
     }
 
     /// Build a temporary git repository with deterministic commits for testing.

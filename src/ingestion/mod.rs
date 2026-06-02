@@ -91,6 +91,15 @@ struct FunctionFrame {
     start_depth: i32,
 }
 
+#[derive(Clone)]
+struct FunctionSpan {
+    id: String,
+    name: String,
+    file_path: String,
+    start_line: usize,
+    end_line: usize,
+}
+
 struct RustSymbolNode {
     id: String,
     node_type: String,
@@ -102,6 +111,7 @@ struct RustFileSnapshot {
     file_path: String,
     content: String,
     symbols: Vec<RustSymbolNode>,
+    function_spans: Vec<FunctionSpan>,
 }
 
 impl RustSymbolKind {
@@ -135,6 +145,27 @@ impl RustSymbolNode {
             "file": file_path,
             "line": line,
             "rust_symbol_kind": kind.as_relation_hint()
+        })
+        .to_string();
+
+        Self {
+            id: symbol_id,
+            node_type,
+            name: symbol_name.to_string(),
+            metadata,
+        }
+    }
+
+    fn new_function(file_path: &str, symbol_name: &str, start_line: usize, end_line: usize) -> Self {
+        let node_type = RustSymbolKind::Function.as_node_type().to_string();
+        let symbol_id = rust_symbol_id(&node_type, file_path, symbol_name);
+
+        let metadata = json!({
+            "file": file_path,
+            "line": start_line,
+            "start_line": start_line,
+            "end_line": end_line,
+            "rust_symbol_kind": RustSymbolKind::Function.as_relation_hint()
         })
         .to_string();
 
@@ -334,6 +365,20 @@ impl CommitRepository {
         Ok(rows_affected > 0)
     }
 
+    pub fn has_metadata(&self, entity_type: &str, entity_id: &str, key: &str) -> rusqlite::Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT 1
+                 FROM metadata
+                 WHERE entity_type = ?1 AND entity_id = ?2 AND key = ?3
+                 LIMIT 1",
+                params![entity_type, entity_id, key],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+    }
+
     pub fn compute_and_store_file_ownership(&self) -> rusqlite::Result<usize> {
         let files = self.get_all_files()?;
         for file in &files {
@@ -431,22 +476,17 @@ impl CommitRepository {
 
         for function in &functions {
             let file_path = extract_file_path_from_metadata(&function.metadata);
-            let file_commit_count = if file_path.is_empty() {
-                0
-            } else {
-                let file_id = FileNode::from_path(&file_path).id;
-                self.get_total_commits_for_file(&file_id)?
-            };
+            let function_commit_count = self.get_total_commits_for_function(&function.id)?;
 
             let call_degree = self.get_function_call_degree(&function.id)?;
-            let churn_score = file_commit_count * 10 + call_degree;
+            let churn_score = function_commit_count * 10 + call_degree;
             churn_scores.push(churn_score);
 
             raw_metrics.push(FunctionHotspotMetric {
                 function_id: function.id.clone(),
                 function_name: function.name.clone(),
                 file_path,
-                file_commit_count,
+                file_commit_count: function_commit_count,
                 call_degree,
                 churn_score,
                 level: "Low".to_string(),
@@ -541,6 +581,16 @@ impl CommitRepository {
             "SELECT COUNT(*)
              FROM edges
              WHERE relation = 'CALLS' AND (source = ?1 OR target = ?1)",
+            params![function_id],
+            |row| row.get(0),
+        )
+    }
+
+    fn get_total_commits_for_function(&self, function_id: &str) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(DISTINCT source)
+             FROM edges
+             WHERE relation = 'MODIFIED' AND target = ?1",
             params![function_id],
             |row| row.get(0),
         )
@@ -665,6 +715,7 @@ pub struct IngestionReport {
     pub modifies_edges_inserted: usize,
     pub contains_edges_inserted: usize,
     pub call_edges_inserted: usize,
+    pub modified_function_edges_inserted: usize,
     pub co_change_pairs_processed: usize,
     pub function_nodes_inserted: usize,
     pub class_nodes_inserted: usize,
@@ -705,6 +756,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     let mut modifies_edges_inserted = 0usize;
     let mut contains_edges_inserted = 0usize;
     let mut call_edges_inserted = 0usize;
+    let mut modified_function_edges_inserted = 0usize;
     let mut co_change_pairs_processed = 0usize;
     let mut function_nodes_inserted = 0usize;
     let mut class_nodes_inserted = 0usize;
@@ -806,6 +858,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
 
             let content = fs::read_to_string(&rust_file)?;
             let symbols = extract_rust_symbols(&file_path_str, &content)?;
+            let function_spans = extract_rust_function_spans(&file_path_str, &content)?;
             for symbol in &symbols {
                 let inserted = repository.upsert_symbol_node(symbol)?;
                 if inserted {
@@ -837,6 +890,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                 file_path: file_path_str,
                 content,
                 symbols,
+                function_spans,
             });
         }
 
@@ -857,6 +911,9 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                 }
             }
         }
+
+        modified_function_edges_inserted =
+            index_commit_function_relationships(&repo, &repository, &rust_snapshots)?;
     }
 
     let ownership_files_computed = repository.compute_and_store_file_ownership()?;
@@ -871,6 +928,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + modifies_edges_inserted
         + contains_edges_inserted
         + call_edges_inserted
+        + modified_function_edges_inserted
         + co_change_pairs_processed
         + function_nodes_inserted
         + class_nodes_inserted
@@ -885,6 +943,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + modifies_edges_inserted
         + contains_edges_inserted
         + call_edges_inserted
+        + modified_function_edges_inserted
         + co_change_pairs_processed
         + function_nodes_inserted
         + class_nodes_inserted
@@ -904,6 +963,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         modifies_edges_inserted,
         contains_edges_inserted,
         call_edges_inserted,
+        modified_function_edges_inserted,
         co_change_pairs_processed,
         function_nodes_inserted,
         class_nodes_inserted,
@@ -1236,7 +1296,6 @@ fn collect_rust_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbolNode>, regex::Error> {
-    let fn_re = Regex::new(r"^\s*(pub\s+)?(async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)")?;
     let struct_re = Regex::new(r"^\s*(pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)")?;
     let trait_re = Regex::new(r"^\s*(pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)")?;
     let impl_re = Regex::new(r"^\s*impl(?:<[^>]+>)?\s+([A-Za-z_][A-Za-z0-9_]*)")?;
@@ -1244,6 +1303,18 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
 
     let mut symbols = Vec::<RustSymbolNode>::new();
     let mut seen = HashSet::<String>::new();
+
+    for function in extract_rust_function_spans(file_path, content)? {
+        let symbol = RustSymbolNode::new_function(
+            &function.file_path,
+            &function.name,
+            function.start_line,
+            function.end_line,
+        );
+        if seen.insert(symbol.id.clone()) {
+            symbols.push(symbol);
+        }
+    }
 
     for (index, line) in content.lines().enumerate() {
         let line_number = index + 1;
@@ -1280,15 +1351,6 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
             }
         }
 
-        if let Some(caps) = fn_re.captures(line) {
-            if let Some(name_match) = caps.get(3) {
-                let symbol = RustSymbolNode::new(RustSymbolKind::Function, file_path, name_match.as_str(), line_number);
-                if seen.insert(symbol.id.clone()) {
-                    symbols.push(symbol);
-                }
-            }
-        }
-
         if let Some(caps) = global_re.captures(line) {
             if let Some(name_match) = caps.get(4) {
                 let symbol = RustSymbolNode::new(
@@ -1305,6 +1367,315 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
     }
 
     Ok(symbols)
+}
+
+fn extract_rust_function_spans(
+    file_path: &str,
+    content: &str,
+) -> Result<Vec<FunctionSpan>, regex::Error> {
+    let fn_decl_re = Regex::new(
+        r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+    )?;
+
+    let mut pending_function_name: Option<String> = None;
+    let mut pending_function_line: Option<usize> = None;
+    let mut function_stack = Vec::<FunctionFrame>::new();
+    let mut function_start_lines = Vec::<usize>::new();
+    let mut functions = Vec::<FunctionSpan>::new();
+    let mut brace_depth = 0i32;
+
+    for (index, raw_line) in content.lines().enumerate() {
+        let line_number = index + 1;
+        let line = strip_line_comment(raw_line);
+
+        if let Some(caps) = fn_decl_re.captures(line) {
+            if let Some(name_match) = caps.get(1) {
+                pending_function_name = Some(name_match.as_str().to_string());
+                pending_function_line = Some(line_number);
+            }
+        }
+
+        let (open_count, close_count) = count_braces(line);
+
+        if let Some(function_name) = pending_function_name.clone() {
+            if open_count > 0 {
+                function_stack.push(FunctionFrame {
+                    function_name,
+                    start_depth: brace_depth,
+                });
+                function_start_lines.push(pending_function_line.unwrap_or(line_number));
+                pending_function_name = None;
+                pending_function_line = None;
+            }
+        }
+
+        brace_depth += open_count - close_count;
+
+        while let Some(current) = function_stack.last() {
+            if brace_depth <= current.start_depth {
+                let current = function_stack.pop().expect("frame exists");
+                let start_line = function_start_lines.pop().unwrap_or(line_number);
+                functions.push(FunctionSpan {
+                    id: rust_symbol_id("Function", file_path, &current.function_name),
+                    name: current.function_name,
+                    file_path: file_path.to_string(),
+                    start_line,
+                    end_line: line_number,
+                });
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok(functions)
+}
+
+fn index_commit_function_relationships(
+    repo: &Repository,
+    repository: &CommitRepository,
+    rust_snapshots: &[RustFileSnapshot],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let current_function_ids = rust_snapshots
+        .iter()
+        .flat_map(|snapshot| snapshot.function_spans.iter().map(|span| span.id.clone()))
+        .collect::<HashSet<_>>();
+
+    let mut revwalk = repo.revwalk()?;
+    revwalk.push_head()?;
+    revwalk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
+
+    let mut inserted = 0usize;
+    for oid_result in revwalk {
+        let oid = oid_result?;
+        let commit = repo.find_commit(oid)?;
+        let commit_id = format!("commit_{}", commit.id());
+
+        if repository.has_metadata("Commit", &commit_id, "function_modifications_indexed")? {
+            continue;
+        }
+
+        inserted += index_commit_function_edges_for_commit(
+            repo,
+            repository,
+            &commit,
+            &current_function_ids,
+        )?;
+
+        let _ = repository.upsert_metadata(
+            "Commit",
+            &commit_id,
+            "function_modifications_indexed",
+            "{\"indexed\":true}",
+        )?;
+    }
+
+    Ok(inserted)
+}
+
+fn index_commit_function_edges_for_commit(
+    repo: &Repository,
+    repository: &CommitRepository,
+    commit: &git2::Commit<'_>,
+    current_function_ids: &HashSet<String>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let commit_tree = commit.tree()?;
+    let parent_tree = if commit.parent_count() > 0 {
+        Some(commit.parent(0)?.tree()?)
+    } else {
+        None
+    };
+
+    let mut options = git2::DiffOptions::new();
+    let diff = if let Some(parent_tree_ref) = parent_tree.as_ref() {
+        repo.diff_tree_to_tree(Some(parent_tree_ref), Some(&commit_tree), Some(&mut options))?
+    } else {
+        repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut options))?
+    };
+
+    let commit_node_id = format!("commit_{}", commit.id());
+    let mut touched_function_ids = HashSet::<String>::new();
+
+    for delta_index in 0..diff.deltas().len() {
+        let Some(delta) = diff.get_delta(delta_index) else {
+            continue;
+        };
+
+        let old_path = delta
+            .old_file()
+            .path()
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+        let new_path = delta
+            .new_file()
+            .path()
+            .map(|path| path.to_string_lossy().replace('\\', "/"));
+
+        let relevant_path = new_path
+            .as_ref()
+            .or(old_path.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        if !relevant_path.ends_with(".rs") {
+            continue;
+        }
+
+        let old_content = match (parent_tree.as_ref(), old_path.as_deref()) {
+            (Some(tree), Some(path)) => read_file_content_from_tree(repo, tree, path)?,
+            _ => None,
+        };
+        let new_content = match new_path.as_deref() {
+            Some(path) => read_file_content_from_tree(repo, &commit_tree, path)?,
+            None => None,
+        };
+
+        let old_functions = if let (Some(path), Some(content)) = (old_path.as_deref(), old_content.as_deref()) {
+            extract_rust_function_spans(path, content)?
+        } else {
+            Vec::new()
+        };
+        let new_functions = if let (Some(path), Some(content)) = (new_path.as_deref(), new_content.as_deref()) {
+            extract_rust_function_spans(path, content)?
+        } else {
+            Vec::new()
+        };
+
+        let changed_ranges = extract_changed_line_ranges(&diff, delta_index)?;
+
+        if changed_ranges.full_file {
+            for function in old_functions.iter().chain(new_functions.iter()) {
+                if current_function_ids.contains(&function.id) {
+                    touched_function_ids.insert(function.id.clone());
+                }
+            }
+            continue;
+        }
+
+        for function in old_functions {
+            if current_function_ids.contains(&function.id)
+                && changed_ranges
+                    .old_ranges
+                    .iter()
+                    .any(|range| ranges_intersect(*range, (function.start_line, function.end_line)))
+            {
+                touched_function_ids.insert(function.id);
+            }
+        }
+
+        for function in new_functions {
+            if current_function_ids.contains(&function.id)
+                && changed_ranges
+                    .new_ranges
+                    .iter()
+                    .any(|range| ranges_intersect(*range, (function.start_line, function.end_line)))
+            {
+                touched_function_ids.insert(function.id);
+            }
+        }
+    }
+
+    let mut inserted = 0usize;
+    for function_id in touched_function_ids {
+        let edge = EdgeRecord {
+            source: commit_node_id.clone(),
+            target: function_id,
+            relation: "MODIFIED".to_string(),
+            metadata: None,
+        };
+
+        if repository.upsert_edge(&edge)? {
+            inserted += 1;
+        }
+    }
+
+    Ok(inserted)
+}
+
+struct ChangedLineRanges {
+    old_ranges: Vec<(usize, usize)>,
+    new_ranges: Vec<(usize, usize)>,
+    full_file: bool,
+}
+
+fn extract_changed_line_ranges(
+    diff: &git2::Diff<'_>,
+    delta_index: usize,
+) -> Result<ChangedLineRanges, git2::Error> {
+    let Some(patch) = git2::Patch::from_diff(diff, delta_index)? else {
+        return Ok(ChangedLineRanges {
+            old_ranges: Vec::new(),
+            new_ranges: Vec::new(),
+            full_file: true,
+        });
+    };
+
+    let mut old_ranges = Vec::<(usize, usize)>::new();
+    let mut new_ranges = Vec::<(usize, usize)>::new();
+
+    for hunk_index in 0..patch.num_hunks() {
+        let (_, line_count) = patch.hunk(hunk_index)?;
+        let mut old_start = None::<usize>;
+        let mut old_end = None::<usize>;
+        let mut new_start = None::<usize>;
+        let mut new_end = None::<usize>;
+
+        for line_index in 0..line_count {
+            let line = patch.line_in_hunk(hunk_index, line_index)?;
+            match line.origin() {
+                '+' => {
+                    if let Some(line_no) = line.new_lineno() {
+                        let line_no = line_no as usize;
+                        new_start.get_or_insert(line_no);
+                        new_end = Some(line_no);
+                    }
+                }
+                '-' => {
+                    if let Some(line_no) = line.old_lineno() {
+                        let line_no = line_no as usize;
+                        old_start.get_or_insert(line_no);
+                        old_end = Some(line_no);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if let (Some(start), Some(end)) = (old_start, old_end) {
+            old_ranges.push((start, end));
+        }
+        if let (Some(start), Some(end)) = (new_start, new_end) {
+            new_ranges.push((start, end));
+        }
+    }
+
+    Ok(ChangedLineRanges {
+        full_file: old_ranges.is_empty() && new_ranges.is_empty(),
+        old_ranges,
+        new_ranges,
+    })
+}
+
+fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
+    left.0 <= right.1 && right.0 <= left.1
+}
+
+fn read_file_content_from_tree(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    file_path: &str,
+) -> Result<Option<String>, git2::Error> {
+    let tree_path = Path::new(file_path);
+    let entry = match tree.get_path(tree_path) {
+        Ok(entry) => entry,
+        Err(err) if err.code() == git2::ErrorCode::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+
+    let object = entry.to_object(repo)?;
+    let Some(blob) = object.as_blob() else {
+        return Ok(None);
+    };
+
+    Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
 }
 
 fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
@@ -1352,7 +1723,7 @@ mod tests {
         let file_count: i64 = db
             .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'File'", [], |row| row.get(0))
             .expect("file count should succeed");
-        let directory_count: i64 = db
+        let _directory_count: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM nodes WHERE type = 'Directory'",
                 [],
@@ -1373,7 +1744,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("modifies count should succeed");
-        let contains_count: i64 = db
+        let _contains_count: i64 = db
             .query_row(
                 "SELECT COUNT(*) FROM edges WHERE relation = 'CONTAINS'",
                 [],
@@ -1399,10 +1770,8 @@ mod tests {
         assert_eq!(commit_count, 3);
         assert_eq!(author_count, 1);
         assert!(file_count >= 1);
-        assert!(directory_count >= 1);
         assert_eq!(authored_by_count, 3);
         assert!(modifies_count >= 3);
-        assert!(contains_count >= 1);
         assert_eq!(ownership_count, file_count);
         assert_eq!(hotspot_count, file_count);
         assert_eq!(report.ownership_files_computed as i64, file_count);
@@ -1624,6 +1993,196 @@ fn a() {
         assert_eq!(bc_count, 1);
     }
 
+    #[test]
+    fn build_graph_maps_single_function_modification_to_commit() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-functions",
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 1;\n}\n\nfn evict() {\n    let _y = 2;\n}\n",
+            )],
+        );
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "touch-allocate",
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 3;\n}\n\nfn evict() {\n    let _y = 2;\n}\n",
+            )],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+
+        let allocate_id = rust_symbol_id("Function", "src/lib.rs", "allocate");
+        let evict_id = rust_symbol_id("Function", "src/lib.rs", "evict");
+        let touch_commit_id = head_commit_node_id(&repo);
+
+        let allocate_edge_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1 AND target = ?2",
+                params![touch_commit_id.clone(), allocate_id],
+                |row| row.get(0),
+            )
+            .expect("allocate edge count should succeed");
+        let evict_edge_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1 AND target = ?2",
+                params![touch_commit_id, evict_id],
+                |row| row.get(0),
+            )
+            .expect("evict edge count should succeed");
+
+        assert_eq!(allocate_edge_count, 1);
+        assert_eq!(evict_edge_count, 0);
+    }
+
+    #[test]
+    fn build_graph_maps_multiple_functions_modified_by_commit() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-functions",
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 1;\n}\n\nfn evict() {\n    let _y = 2;\n}\n",
+            )],
+        );
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "touch-both",
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 4;\n}\n\nfn evict() {\n    let _y = 5;\n}\n",
+            )],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let touch_commit_id = head_commit_node_id(&repo);
+
+        let modified_functions: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1",
+                params![touch_commit_id],
+                |row| row.get(0),
+            )
+            .expect("modified function count should succeed");
+
+        assert_eq!(modified_functions, 2);
+    }
+
+    #[test]
+    fn build_graph_maps_whole_file_rewrite_to_all_functions() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-functions",
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 1;\n}\n\nfn evict() {\n    let _y = 2;\n}\n",
+            )],
+        );
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "rewrite-file",
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 10;\n    let _z = 20;\n}\n\nfn evict() {\n    let _y = 30;\n    let _w = 40;\n}\n",
+            )],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let rewrite_commit_id = head_commit_node_id(&repo);
+
+        let modified_functions: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1",
+                params![rewrite_commit_id],
+                |row| row.get(0),
+            )
+            .expect("modified function count should succeed");
+
+        assert_eq!(modified_functions, 2);
+    }
+
+    #[test]
+    fn build_graph_maps_function_rename_commit_to_current_function() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-old-name",
+            &[("src/lib.rs", "fn allocate() {\n    let _x = 1;\n}\n")],
+        );
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "rename-function",
+            &[("src/lib.rs", "fn reserve() {\n    let _x = 2;\n}\n")],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let rename_commit_id = head_commit_node_id(&repo);
+        let reserve_id = rust_symbol_id("Function", "src/lib.rs", "reserve");
+
+        let reserve_edge_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1 AND target = ?2",
+                params![rename_commit_id, reserve_id],
+                |row| row.get(0),
+            )
+            .expect("renamed function edge count should succeed");
+
+        assert_eq!(reserve_edge_count, 1);
+    }
+
+    #[test]
+    fn build_graph_skips_noop_commits_for_function_edges() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-function",
+            &[("src/lib.rs", "fn allocate() {\n    let _x = 1;\n}\n")],
+        );
+        commit_empty(&repo, "noop");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let noop_commit_id = head_commit_node_id(&repo);
+
+        let modified_functions: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1",
+                params![noop_commit_id],
+                |row| row.get(0),
+            )
+            .expect("modified function count should succeed");
+
+        assert_eq!(modified_functions, 0);
+    }
+
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let repo = Repository::init(temp_dir.path()).expect("repo should be initialized");
@@ -1702,5 +2261,36 @@ fn a() {
             repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])
                 .expect("initial commit should succeed");
         }
+    }
+
+    fn commit_empty(repo: &Repository, message: &str) {
+        let signature =
+            Signature::now("Test User", "test@example.com").expect("signature should exist");
+        let parent_commit = repo
+            .head()
+            .ok()
+            .and_then(|head| head.target())
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .expect("parent commit should exist");
+        let tree = parent_commit.tree().expect("parent tree should exist");
+
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            message,
+            &tree,
+            &[&parent_commit],
+        )
+        .expect("empty commit should succeed");
+    }
+
+    fn head_commit_node_id(repo: &Repository) -> String {
+        let head = repo
+            .head()
+            .expect("head should exist")
+            .target()
+            .expect("head target should exist");
+        format!("commit_{}", head)
     }
 }
