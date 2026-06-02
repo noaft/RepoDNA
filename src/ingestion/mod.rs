@@ -857,6 +857,7 @@ pub struct IngestionReport {
 pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
     let repo = Repository::discover(repo_path)?;
     let db_path = resolve_graph_db_path(&repo);
+    ensure_repodna_dir(&repo)?;
     let repository = CommitRepository::open(&db_path)?;
 
     let mut revwalk = repo.revwalk()?;
@@ -1093,6 +1094,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + global_variable_nodes_inserted;
 
     let duplicates_skipped = total_possible.saturating_sub(inserted_total);
+
+    write_repodna_state(&repo)?;
 
     Ok(IngestionReport {
         scanned,
@@ -1909,14 +1912,48 @@ fn read_file_content_from_tree(
 
 fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
     if let Some(workdir) = repo.workdir() {
-        return workdir.join("graph.db");
+        return workdir.join(".repodna").join("graph.db");
     }
 
     if let Some(repo_root) = repo.path().parent() {
-        return repo_root.join("graph.db");
+        return repo_root.join(".repodna").join("graph.db");
     }
 
-    PathBuf::from("graph.db")
+    PathBuf::from(".repodna").join("graph.db")
+}
+
+fn resolve_repodna_dir(repo: &Repository) -> PathBuf {
+    if let Some(workdir) = repo.workdir() {
+        return workdir.join(".repodna");
+    }
+
+    if let Some(repo_root) = repo.path().parent() {
+        return repo_root.join(".repodna");
+    }
+
+    PathBuf::from(".repodna")
+}
+
+fn ensure_repodna_dir(repo: &Repository) -> io::Result<PathBuf> {
+    let dir = resolve_repodna_dir(repo);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn write_repodna_state(repo: &Repository) -> io::Result<()> {
+    let dir = ensure_repodna_dir(repo)?;
+    let head_sha = repo
+        .head()
+        .ok()
+        .and_then(|head| head.target())
+        .map(|oid| oid.to_string())
+        .unwrap_or_default();
+
+    let state = json!({
+        "last_built_commit": head_sha
+    });
+
+    fs::write(dir.join("state.json"), state.to_string())
 }
 
 #[cfg(test)]
@@ -2549,6 +2586,33 @@ impl B {
         assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
         assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
         assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn build_graph_writes_repodna_state_file() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+
+        let state_path = temp_dir.path().join(".repodna").join("state.json");
+        assert!(state_path.exists());
+        assert_eq!(report.db_path, temp_dir.path().join(".repodna").join("graph.db"));
+
+        let raw = std::fs::read_to_string(state_path).expect("state file should be readable");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&raw).expect("state json should parse");
+        let expected_head = repo
+            .head()
+            .expect("head should exist")
+            .target()
+            .expect("head target should exist")
+            .to_string();
+
+        assert_eq!(
+            parsed.get("last_built_commit").and_then(serde_json::Value::as_str),
+            Some(expected_head.as_str())
+        );
     }
 
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {

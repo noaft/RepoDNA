@@ -3,6 +3,7 @@ use std::env;
 mod api;
 mod history;
 mod ingestion;
+use std::path::PathBuf;
 
 /// Entry point for RepoDNA CLI.
 ///
@@ -64,11 +65,11 @@ fn main() {
         };
 
         let db_path = if let Some(workdir) = repo.workdir() {
-            workdir.join("graph.db")
+            workdir.join(".repodna").join("graph.db")
         } else if let Some(root) = repo.path().parent() {
-            root.join("graph.db")
+            root.join(".repodna").join("graph.db")
         } else {
-            std::path::PathBuf::from("graph.db")
+            PathBuf::from(".repodna").join("graph.db")
         };
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
