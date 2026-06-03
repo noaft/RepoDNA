@@ -1,6 +1,7 @@
 use git2::{Repository, Sort};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -847,6 +848,40 @@ pub struct IngestionReport {
     pub db_path: PathBuf,
 }
 
+#[derive(Serialize, Deserialize, Default)]
+struct RepoDnaState {
+    last_built_commit: String,
+    last_built_ref: Option<String>,
+}
+
+impl IngestionReport {
+    fn empty(db_path: PathBuf) -> Self {
+        Self {
+            scanned: 0,
+            commit_nodes_inserted: 0,
+            author_nodes_inserted: 0,
+            file_nodes_inserted: 0,
+            directory_nodes_inserted: 0,
+            authored_by_edges_inserted: 0,
+            modifies_edges_inserted: 0,
+            contains_edges_inserted: 0,
+            call_edges_inserted: 0,
+            modified_function_edges_inserted: 0,
+            co_change_pairs_processed: 0,
+            function_nodes_inserted: 0,
+            class_nodes_inserted: 0,
+            struct_nodes_inserted: 0,
+            interface_nodes_inserted: 0,
+            global_variable_nodes_inserted: 0,
+            ownership_files_computed: 0,
+            hotspot_files_computed: 0,
+            hotspot_functions_computed: 0,
+            duplicates_skipped: 0,
+            db_path,
+        }
+    }
+}
+
 /// Build the foundation graph from commits reachable from HEAD.
 ///
 /// Behavior:
@@ -1199,6 +1234,67 @@ fn rust_symbol_id(node_type: &str, file_path: &str, symbol_name: &str) -> String
         sanitize_id(file_path),
         sanitize_id(symbol_name)
     )
+}
+
+pub fn update_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
+    let repo = Repository::discover(repo_path)?;
+    let db_path = resolve_graph_db_path(&repo);
+    ensure_repodna_dir(&repo)?;
+
+    let state = read_repodna_state(&repo)?;
+    let current_head = repo
+        .head()
+        .ok()
+        .and_then(|head| head.target())
+        .map(|oid| oid.to_string())
+        .unwrap_or_default();
+
+    if current_head.is_empty() {
+        return Ok(IngestionReport::empty(db_path));
+    }
+
+    if state.last_built_commit.is_empty() {
+        return build_graph(repo_path);
+    }
+
+    if state.last_built_commit == current_head {
+        return Ok(IngestionReport::empty(db_path));
+    }
+
+    let old_oid = match git2::Oid::from_str(&state.last_built_commit) {
+        Ok(oid) => oid,
+        Err(_) => return rebuild_graph(repo_path),
+    };
+    let new_oid = match git2::Oid::from_str(&current_head) {
+        Ok(oid) => oid,
+        Err(_) => return rebuild_graph(repo_path),
+    };
+
+    if repo.find_commit(old_oid).is_err() {
+        return rebuild_graph(repo_path);
+    }
+
+    let is_fast_forward = repo.graph_descendant_of(new_oid, old_oid).unwrap_or(false);
+    if is_fast_forward {
+        return build_graph(repo_path);
+    }
+
+    let merge_base = repo.merge_base(old_oid, new_oid).ok();
+    if merge_base == Some(new_oid) {
+        return rebuild_graph(repo_path);
+    }
+
+    rebuild_graph(repo_path)
+}
+
+pub fn rebuild_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
+    let repo = Repository::discover(repo_path)?;
+    let db_path = resolve_graph_db_path(&repo);
+    ensure_repodna_dir(&repo)?;
+    if db_path.exists() {
+        fs::remove_file(&db_path)?;
+    }
+    build_graph(repo_path)
 }
 
 fn rust_function_symbol_id(file_path: &str, symbol_name: &str, start_line: usize) -> String {
@@ -1942,18 +2038,37 @@ fn ensure_repodna_dir(repo: &Repository) -> io::Result<PathBuf> {
 
 fn write_repodna_state(repo: &Repository) -> io::Result<()> {
     let dir = ensure_repodna_dir(repo)?;
-    let head_sha = repo
-        .head()
-        .ok()
+    let head = repo.head().ok();
+    let head_sha = head
+        .as_ref()
         .and_then(|head| head.target())
         .map(|oid| oid.to_string())
         .unwrap_or_default();
+    let head_ref = head
+        .as_ref()
+        .and_then(|head| head.name())
+        .map(ToString::to_string);
 
-    let state = json!({
-        "last_built_commit": head_sha
-    });
+    let state = RepoDnaState {
+        last_built_commit: head_sha,
+        last_built_ref: head_ref,
+    };
 
-    fs::write(dir.join("state.json"), state.to_string())
+    let raw = serde_json::to_string(&state)
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+
+    fs::write(dir.join("state.json"), raw)
+}
+
+fn read_repodna_state(repo: &Repository) -> io::Result<RepoDnaState> {
+    let path = resolve_repodna_dir(repo).join("state.json");
+    if !path.exists() {
+        return Ok(RepoDnaState::default());
+    }
+
+    let raw = fs::read_to_string(path)?;
+    serde_json::from_str::<RepoDnaState>(&raw)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
 }
 
 #[cfg(test)]
@@ -2615,6 +2730,88 @@ impl B {
         );
     }
 
+    #[test]
+    fn update_graph_fast_forward_adds_new_commits() {
+        let (temp_dir, repo) = init_repo_with_commits(&["base"]);
+
+        let first = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("initial build should succeed");
+        let first_db = Connection::open(first.db_path).expect("db should open");
+        let first_commit_count: i64 = first_db
+            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .expect("commit count should succeed");
+        assert_eq!(first_commit_count, 1);
+
+        commit_files(&repo, temp_dir.path(), "after-base", &[("src/lib.rs", "fn run() {}\n")]);
+
+        let report = update_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("update should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let commit_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .expect("commit count should succeed");
+
+        assert_eq!(commit_count, 2);
+    }
+
+    #[test]
+    fn update_graph_rebuilds_cleanly_after_diverged_history() {
+        let (temp_dir, repo) = init_repo_with_commits(&["base"]);
+
+        let base_oid = repo
+            .head()
+            .expect("head should exist")
+            .target()
+            .expect("head target should exist");
+        repo.branch("feature", &repo.find_commit(base_oid).expect("base commit should exist"), false)
+            .expect("branch should be created");
+
+        checkout_branch(&repo, "feature");
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "feature-only",
+            &[("src/feature.rs", "fn feature_only() {}\n")],
+        );
+
+        build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("feature build should succeed");
+
+        checkout_branch(&repo, "master");
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "main-only",
+            &[("src/main_only.rs", "fn main_only() {}\n")],
+        );
+
+        let report = update_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("update should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+
+        let commit_count: i64 = db
+            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .expect("commit count should succeed");
+        let feature_commit_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Commit' AND name = 'feature-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("feature-only commit count should succeed");
+        let main_commit_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Commit' AND name = 'main-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("main-only commit count should succeed");
+
+        assert_eq!(commit_count, 2);
+        assert_eq!(feature_commit_count, 0);
+        assert_eq!(main_commit_count, 1);
+    }
+
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let repo = Repository::init(temp_dir.path()).expect("repo should be initialized");
@@ -2763,5 +2960,15 @@ impl B {
             &[&parent_commit],
         )
         .expect("delete commit should succeed");
+    }
+
+    fn checkout_branch(repo: &Repository, branch_name: &str) {
+        let reference_name = format!("refs/heads/{}", branch_name);
+        let object = repo
+            .revparse_single(&reference_name)
+            .expect("branch object should exist");
+        repo.checkout_tree(&object, None)
+            .expect("checkout tree should succeed");
+        repo.set_head(&reference_name).expect("set head should succeed");
     }
 }
