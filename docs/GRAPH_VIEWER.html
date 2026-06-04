@@ -1068,7 +1068,7 @@
             node.hotspot = info.hotspot;
             node.churn_score = info.churn_score;
             node.call_degree = info.call_degree;
-            node.function_commit_count = info.function_commit_count;
+            node.function_commit_score = info.function_commit_score;
           }
         });
 
@@ -1127,7 +1127,7 @@
             lines.push(`Hotspot: ${insights.file_insights.hotspot}`);
           }
           if (typeof insights.file_insights.churn_score === "number") {
-            lines.push(`Churn score: ${insights.file_insights.churn_score}`);
+            lines.push(`Churn score: ${insights.file_insights.churn_score.toFixed(4)}`);
           }
           if (insights.file_insights.top_owner) {
             const top = insights.file_insights.top_owner;

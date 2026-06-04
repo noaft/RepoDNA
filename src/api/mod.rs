@@ -62,7 +62,7 @@ pub struct FileInsights {
     pub commits: Vec<NodeRecord>,
     pub top_contributors: Vec<FileOwnerScore>,
     pub top_owner: Option<FileOwnerScore>,
-    pub churn_score: Option<i64>,
+    pub churn_score: Option<f64>,
     pub hotspot: Option<String>,
 }
 
@@ -76,7 +76,7 @@ pub struct FileOwnerScore {
 #[derive(Serialize)]
 pub struct FileHotspotResponse {
     pub file_id: String,
-    pub churn_score: i64,
+    pub churn_score: f64,
     pub hotspot: String,
 }
 
@@ -85,9 +85,9 @@ pub struct FunctionHotspotResponse {
     pub function_id: String,
     pub function_name: String,
     pub file: String,
-    pub function_commit_count: i64,
+    pub function_commit_score: f64,
     pub call_degree: i64,
-    pub churn_score: i64,
+    pub churn_score: f64,
     pub hotspot: String,
 }
 
@@ -678,8 +678,8 @@ async fn get_file_hotspots(
             file_id,
             churn_score: parsed
                 .get("churn_score")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
             hotspot: parsed
                 .get("hotspot")
                 .and_then(Value::as_str)
@@ -733,18 +733,18 @@ async fn get_function_hotspots(
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
-            function_commit_count: parsed
-                .get("file_commit_count")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
+            function_commit_score: parsed
+                .get("function_commit_score")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
             call_degree: parsed
                 .get("call_degree")
                 .and_then(Value::as_i64)
                 .unwrap_or(0),
             churn_score: parsed
                 .get("churn_score")
-                .and_then(Value::as_i64)
-                .unwrap_or(0),
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
             hotspot: parsed
                 .get("hotspot")
                 .and_then(Value::as_str)
@@ -756,7 +756,8 @@ async fn get_function_hotspots(
     output.sort_by(|left, right| {
         right
             .churn_score
-            .cmp(&left.churn_score)
+            .partial_cmp(&left.churn_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| left.function_name.cmp(&right.function_name))
     });
 
@@ -1258,8 +1259,8 @@ fn get_hotspot_for_file(
         file_id: file_id.to_string(),
         churn_score: parsed
             .get("churn_score")
-            .and_then(Value::as_i64)
-            .unwrap_or(0),
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
         hotspot: parsed
             .get("hotspot")
             .and_then(Value::as_str)

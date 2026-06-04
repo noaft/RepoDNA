@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Node model for graph storage.
 pub struct CommitNode {
@@ -65,7 +66,7 @@ struct AuthorOwnershipScore {
 struct FileHotspotMetric {
     file_id: String,
     file_name: String,
-    churn_score: i64,
+    churn_score: f64,
     level: String,
 }
 
@@ -73,9 +74,9 @@ struct FunctionHotspotMetric {
     function_id: String,
     function_name: String,
     file_path: String,
-    file_commit_count: i64,
+    function_commit_score: f64,
     call_degree: i64,
-    churn_score: i64,
+    churn_score: f64,
     level: String,
 }
 
@@ -480,24 +481,26 @@ impl CommitRepository {
             return Ok(0);
         }
 
-        let mut churn_scores = Vec::<i64>::new();
-        let mut raw_rows = Vec::<(String, String, i64)>::new();
+        let mut churn_scores = Vec::<f64>::new();
+        let mut raw_rows = Vec::<(String, String, f64)>::new();
         for file in &files {
-            let churn_score = self.get_total_commits_for_file(&file.id)?;
+            let churn_score = self.get_time_decay_commit_score(&file.id, "MODIFIES")?;
             churn_scores.push(churn_score);
             raw_rows.push((file.id.clone(), file.name.clone(), churn_score));
         }
 
-        churn_scores.sort();
+        churn_scores.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let len = churn_scores.len();
         let low_threshold = churn_scores[(len.saturating_sub(1) * 33) / 100];
         let high_threshold = churn_scores[(len.saturating_sub(1) * 66) / 100];
 
         let mut metrics = Vec::<FileHotspotMetric>::new();
         for (file_id, file_name, churn_score) in raw_rows {
-            let level = if churn_score >= high_threshold {
+            let level = if churn_score <= 0.0 {
+                "Low"
+            } else if churn_score >= high_threshold && high_threshold > 0.0 {
                 "High"
-            } else if churn_score >= low_threshold {
+            } else if churn_score >= low_threshold && low_threshold > 0.0 {
                 "Medium"
             } else {
                 "Low"
@@ -517,6 +520,8 @@ impl CommitRepository {
                 "file_id": metric.file_id,
                 "file": metric.file_name,
                 "churn_score": metric.churn_score,
+                "hotspot_formula": "e^(-days / half_life)",
+                "half_life_days": hotspot_half_life_days(),
                 "hotspot": metric.level
             })
             .to_string();
@@ -533,37 +538,38 @@ impl CommitRepository {
             return Ok(0);
         }
 
-        let mut churn_scores = Vec::<i64>::new();
+        let mut churn_scores = Vec::<f64>::new();
         let mut raw_metrics = Vec::<FunctionHotspotMetric>::new();
 
         for function in &functions {
             let file_path = extract_file_path_from_metadata(&function.metadata);
-            let function_commit_count = self.get_total_commits_for_function(&function.id)?;
-
+            let function_commit_score = self.get_time_decay_commit_score(&function.id, "MODIFIED")?;
             let call_degree = self.get_function_call_degree(&function.id)?;
-            let churn_score = function_commit_count * 10 + call_degree;
+            let churn_score = function_commit_score;
             churn_scores.push(churn_score);
 
             raw_metrics.push(FunctionHotspotMetric {
                 function_id: function.id.clone(),
                 function_name: function.name.clone(),
                 file_path,
-                file_commit_count: function_commit_count,
+                function_commit_score,
                 call_degree,
                 churn_score,
                 level: "Low".to_string(),
             });
         }
 
-        churn_scores.sort();
+        churn_scores.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let len = churn_scores.len();
         let low_threshold = churn_scores[(len.saturating_sub(1) * 33) / 100];
         let high_threshold = churn_scores[(len.saturating_sub(1) * 66) / 100];
 
         for metric in &mut raw_metrics {
-            metric.level = if metric.churn_score >= high_threshold {
+            metric.level = if metric.churn_score <= 0.0 {
+                "Low"
+            } else if metric.churn_score >= high_threshold && high_threshold > 0.0 {
                 "High"
-            } else if metric.churn_score >= low_threshold {
+            } else if metric.churn_score >= low_threshold && low_threshold > 0.0 {
                 "Medium"
             } else {
                 "Low"
@@ -574,9 +580,11 @@ impl CommitRepository {
                 "function_id": metric.function_id,
                 "function": metric.function_name,
                 "file": metric.file_path,
-                "file_commit_count": metric.file_commit_count,
+                "function_commit_score": metric.function_commit_score,
                 "call_degree": metric.call_degree,
                 "churn_score": metric.churn_score,
+                "hotspot_formula": "e^(-days / half_life)",
+                "half_life_days": hotspot_half_life_days(),
                 "hotspot": metric.level
             })
             .to_string();
@@ -713,6 +721,33 @@ impl CommitRepository {
             params![function_id],
             |row| row.get(0),
         )
+    }
+
+    fn get_time_decay_commit_score(&self, target_id: &str, relation: &str) -> rusqlite::Result<f64> {
+        let now = current_unix_seconds();
+        let half_life = hotspot_half_life_days();
+        let mut stmt = self.conn.prepare(
+            "SELECT CAST(COALESCE(json_extract(n.metadata, '$.timestamp'), 0) AS INTEGER)
+             FROM edges e
+             JOIN nodes n ON n.id = e.source
+             WHERE e.relation = ?1 AND e.target = ?2 AND n.type = 'Commit'",
+        )?;
+
+        let rows = stmt.query_map(params![relation, target_id], |row| row.get::<_, i64>(0))?;
+
+        let mut score = 0.0f64;
+        for row in rows {
+            let timestamp = row?;
+            if timestamp <= 0 {
+                continue;
+            }
+
+            let age_seconds = (now - timestamp).max(0) as f64;
+            let age_days = age_seconds / 86_400.0;
+            score += (-(age_days / half_life)).exp();
+        }
+
+        Ok(score)
     }
 
     fn get_file_ownership_breakdown(
@@ -1186,6 +1221,17 @@ fn collect_modified_files(
     let mut files: Vec<String> = seen.into_iter().collect();
     files.sort();
     Ok(files)
+}
+
+fn hotspot_half_life_days() -> f64 {
+    30.0
+}
+
+fn current_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn generate_file_pairs(files: &[String]) -> Vec<(String, String)> {
@@ -2219,6 +2265,42 @@ fn helper() {}
         assert!(report.class_nodes_inserted >= 1);
         assert!(report.global_variable_nodes_inserted >= 1);
         assert!(report.hotspot_functions_computed >= 2);
+    }
+
+    #[test]
+    fn build_graph_marks_zero_churn_function_hotspot_as_low() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["initial"]);
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+
+        let rust_source = r#"
+fn resolve_graph_db_path() {}
+"#;
+
+        std::fs::write(src_dir.join("single.rs"), rust_source).expect("rust file should be written");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+
+        let db = Connection::open(report.db_path).expect("db should open");
+        let function_id = rust_function_symbol_id("src/single.rs", "resolve_graph_db_path", 2);
+        let raw: String = db
+            .query_row(
+                "SELECT value FROM metadata WHERE entity_type = 'Function' AND entity_id = ?1 AND key = 'hotspot'",
+                params![function_id],
+                |row| row.get(0),
+            )
+            .expect("hotspot metadata should exist");
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("metadata should parse");
+
+        assert_eq!(
+            parsed.get("churn_score").and_then(serde_json::Value::as_f64).unwrap_or(-1.0),
+            0.0
+        );
+        assert_eq!(
+            parsed.get("hotspot").and_then(serde_json::Value::as_str),
+            Some("Low")
+        );
     }
 
     #[test]
