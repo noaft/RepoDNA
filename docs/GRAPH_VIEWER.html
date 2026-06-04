@@ -403,6 +403,8 @@
       <div class="controls">
         <input id="apiBase" value="http://127.0.0.1:3000" aria-label="API base URL" />
         <input id="nodeSearch" placeholder="Search node by name or id" aria-label="Node search" />
+        <button class="btn active" id="fullGraphModeBtn">Full Graph</button>
+        <button class="btn" id="mainTreeModeBtn">Main Tree</button>
         <button class="btn" id="toggleLifecycleBtn">Show Commit+Author</button>
         <button class="btn" id="toggleNonCodeBtn">Show Non-Code Files</button>
         <button class="btn" id="searchBtn">Search</button>
@@ -420,6 +422,7 @@
       <aside class="panel side">
         <h2>Selection</h2>
         <div class="legend">
+          <span class="chip" id="modeLegendChip">Mode: Full Graph</span>
           <span class="chip">CodeGraph: Commit/Author hidden</span>
           <span class="chip">Directory</span>
           <span class="chip">File</span>
@@ -481,6 +484,7 @@
       cy: null,
       nodes: [],
       edges: [],
+      graphMode: "full",
       showNonCodeFiles: false,
       showLifecycleNodes: false,
       functionCommitChanges: [],
@@ -505,9 +509,12 @@
     const modalPrevCommitBtnEl = document.getElementById("modalPrevCommitBtn");
     const modalNextCommitBtnEl = document.getElementById("modalNextCommitBtn");
     const searchInputEl = document.getElementById("nodeSearch");
+    const fullGraphModeBtnEl = document.getElementById("fullGraphModeBtn");
+    const mainTreeModeBtnEl = document.getElementById("mainTreeModeBtn");
     const toggleLifecycleBtnEl = document.getElementById("toggleLifecycleBtn");
     const toggleNonCodeBtnEl = document.getElementById("toggleNonCodeBtn");
     const hoverTipEl = document.getElementById("hoverTip");
+    const modeLegendChipEl = document.getElementById("modeLegendChip");
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -561,8 +568,31 @@
       return normalizedType === "commit" || normalizedType === "author";
     }
 
+    function isMainTreeEdge(edge) {
+      const relation = String(edge.relation || edge.type || "").toUpperCase();
+      return relation === "MAIN_FLOW" || relation === "MAIN_TREE";
+    }
+
+    function collectMainTreeNodeIds(baseVisibleNodeIds) {
+      const mainTreeNodeIds = new Set();
+      state.edges.forEach((edge) => {
+        if (!isMainTreeEdge(edge)) {
+          return;
+        }
+
+        if (!baseVisibleNodeIds.has(edge.source) || !baseVisibleNodeIds.has(edge.target)) {
+          return;
+        }
+
+        mainTreeNodeIds.add(edge.source);
+        mainTreeNodeIds.add(edge.target);
+      });
+
+      return mainTreeNodeIds;
+    }
+
     function getVisibleGraph() {
-      const visibleNodeIds = new Set();
+      const baseVisibleNodeIds = new Set();
       state.nodes.forEach((node) => {
         if (!state.showLifecycleNodes && isLifecycleNode(node)) {
           return;
@@ -572,12 +602,22 @@
           return;
         }
 
-        visibleNodeIds.add(node.id);
+        baseVisibleNodeIds.add(node.id);
       });
 
-      const visibleEdges = state.edges.filter((edge) => (
-        visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)
+      let visibleNodeIds = baseVisibleNodeIds;
+      let visibleEdges = state.edges.filter((edge) => (
+        baseVisibleNodeIds.has(edge.source) && baseVisibleNodeIds.has(edge.target)
       ));
+
+      if (state.graphMode === "main_tree") {
+        visibleNodeIds = collectMainTreeNodeIds(baseVisibleNodeIds);
+        visibleEdges = state.edges.filter((edge) => (
+          isMainTreeEdge(edge) &&
+          visibleNodeIds.has(edge.source) &&
+          visibleNodeIds.has(edge.target)
+        ));
+      }
 
       return {
         nodes: state.nodes.filter((node) => visibleNodeIds.has(node.id)),
@@ -595,6 +635,13 @@
       const enabled = state.showNonCodeFiles;
       toggleNonCodeBtnEl.classList.toggle("active", enabled);
       toggleNonCodeBtnEl.textContent = enabled ? "Hide Non-Code Files" : "Show Non-Code Files";
+    }
+
+    function updateGraphModeUi() {
+      const isMainTree = state.graphMode === "main_tree";
+      fullGraphModeBtnEl.classList.toggle("active", !isMainTree);
+      mainTreeModeBtnEl.classList.toggle("active", isMainTree);
+      modeLegendChipEl.textContent = isMainTree ? "Mode: Main Tree" : "Mode: Full Graph";
     }
 
     function getDisplayLabel(node) {
@@ -1088,6 +1135,9 @@
     }
 
     function buildModeStatus(prefix) {
+      const graphModePart = state.graphMode === "main_tree"
+        ? "Main Tree mode"
+        : "Full Graph mode";
       const lifecyclePart = state.showLifecycleNodes
         ? "Full graph mode (Commit/Author visible)"
         : "CodeGraph mode (Commit/Author hidden)";
@@ -1095,7 +1145,7 @@
         ? "non-code files visible"
         : "Source Code Focus ON";
 
-      return `${prefix} ${lifecyclePart}; ${nonCodePart}; heatmap active for File/Function.`;
+      return `${prefix} ${graphModePart}; ${lifecyclePart}; ${nonCodePart}; heatmap active for File/Function.`;
     }
 
     async function loadNodeInsights(nodeId) {
@@ -1394,6 +1444,26 @@
         rerenderGraphWithCurrentFilter();
       }
     });
+    fullGraphModeBtnEl.addEventListener("click", () => {
+      if (state.graphMode === "full") {
+        return;
+      }
+      state.graphMode = "full";
+      updateGraphModeUi();
+      if (state.nodes.length > 0) {
+        rerenderGraphWithCurrentFilter();
+      }
+    });
+    mainTreeModeBtnEl.addEventListener("click", () => {
+      if (state.graphMode === "main_tree") {
+        return;
+      }
+      state.graphMode = "main_tree";
+      updateGraphModeUi();
+      if (state.nodes.length > 0) {
+        rerenderGraphWithCurrentFilter();
+      }
+    });
     searchInputEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         runSearch();
@@ -1443,6 +1513,7 @@
     updateCommitNavigator();
     updateLifecycleToggleUi();
     updateNonCodeToggleUi();
+    updateGraphModeUi();
   </script>
 </body>
 </html>

@@ -30,6 +30,8 @@ fn main() {
                 println!("MODIFIES edges inserted: {}", report.modifies_edges_inserted);
                 println!("CONTAINS edges inserted: {}", report.contains_edges_inserted);
                 println!("CALLS edges inserted: {}", report.call_edges_inserted);
+                println!("MAIN_TREE edges inserted: {}", report.main_tree_edges_inserted);
+                println!("MAIN_FLOW edges inserted: {}", report.main_flow_edges_inserted);
                 println!("MODIFIED function edges inserted: {}", report.modified_function_edges_inserted);
                 println!("CO_CHANGE pairs processed: {}", report.co_change_pairs_processed);
                 println!("Function nodes inserted: {}", report.function_nodes_inserted);
@@ -66,6 +68,8 @@ fn main() {
                 println!("MODIFIES edges inserted: {}", report.modifies_edges_inserted);
                 println!("CONTAINS edges inserted: {}", report.contains_edges_inserted);
                 println!("CALLS edges inserted: {}", report.call_edges_inserted);
+                println!("MAIN_TREE edges inserted: {}", report.main_tree_edges_inserted);
+                println!("MAIN_FLOW edges inserted: {}", report.main_flow_edges_inserted);
                 println!("MODIFIED function edges inserted: {}", report.modified_function_edges_inserted);
                 println!("CO_CHANGE pairs processed: {}", report.co_change_pairs_processed);
                 println!("Function nodes inserted: {}", report.function_nodes_inserted);

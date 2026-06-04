@@ -380,6 +380,13 @@ impl CommitRepository {
         )
     }
 
+    pub fn remove_edges_by_relation(&self, relation: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM edges WHERE relation = ?1",
+            params![relation],
+        )
+    }
+
     pub fn node_count_by_type(&self, node_type: &str) -> rusqlite::Result<usize> {
         self.conn
             .query_row(
@@ -869,6 +876,8 @@ pub struct IngestionReport {
     pub modifies_edges_inserted: usize,
     pub contains_edges_inserted: usize,
     pub call_edges_inserted: usize,
+    pub main_tree_edges_inserted: usize,
+    pub main_flow_edges_inserted: usize,
     pub modified_function_edges_inserted: usize,
     pub co_change_pairs_processed: usize,
     pub function_nodes_inserted: usize,
@@ -901,6 +910,8 @@ impl IngestionReport {
             modifies_edges_inserted: 0,
             contains_edges_inserted: 0,
             call_edges_inserted: 0,
+            main_tree_edges_inserted: 0,
+            main_flow_edges_inserted: 0,
             modified_function_edges_inserted: 0,
             co_change_pairs_processed: 0,
             function_nodes_inserted: 0,
@@ -935,6 +946,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     revwalk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
 
     let _ = repository.remove_file_to_function_contains_edges()?;
+    let _ = repository.remove_edges_by_relation("MAIN_TREE")?;
+    let _ = repository.remove_edges_by_relation("MAIN_FLOW")?;
 
     let mut scanned = 0usize;
     let mut commit_nodes_inserted = 0usize;
@@ -945,6 +958,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     let mut modifies_edges_inserted = 0usize;
     let mut contains_edges_inserted = 0usize;
     let mut call_edges_inserted = 0usize;
+    let mut main_tree_edges_inserted = 0usize;
+    let mut main_flow_edges_inserted = 0usize;
     let mut modified_function_edges_inserted = 0usize;
     let mut co_change_pairs_processed = 0usize;
     let mut function_nodes_inserted = 0usize;
@@ -1124,6 +1139,9 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
             .collect::<HashSet<_>>();
         repository.update_function_activity_statuses(&active_function_ids)?;
 
+        main_tree_edges_inserted = compute_and_store_main_tree(&repository, &rust_snapshots)?;
+        main_flow_edges_inserted = compute_and_store_main_flow_tree(&repository, &rust_snapshots)?;
+
         modified_function_edges_inserted =
             index_commit_function_relationships(&repo, &repository, &rust_snapshots)?;
     }
@@ -1140,6 +1158,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + modifies_edges_inserted
         + contains_edges_inserted
         + call_edges_inserted
+        + main_tree_edges_inserted
+        + main_flow_edges_inserted
         + modified_function_edges_inserted
         + co_change_pairs_processed
         + function_nodes_inserted
@@ -1155,6 +1175,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         + modifies_edges_inserted
         + contains_edges_inserted
         + call_edges_inserted
+        + main_tree_edges_inserted
+        + main_flow_edges_inserted
         + modified_function_edges_inserted
         + co_change_pairs_processed
         + function_nodes_inserted
@@ -1177,6 +1199,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         modifies_edges_inserted,
         contains_edges_inserted,
         call_edges_inserted,
+        main_tree_edges_inserted,
+        main_flow_edges_inserted,
         modified_function_edges_inserted,
         co_change_pairs_processed,
         function_nodes_inserted,
@@ -1533,6 +1557,200 @@ fn extract_rust_function_calls(
     }
 
     Ok(edges)
+}
+
+fn compute_and_store_main_tree(
+    repository: &CommitRepository,
+    snapshots: &[RustFileSnapshot],
+) -> rusqlite::Result<usize> {
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+    let mut main_roots = Vec::<String>::new();
+
+    for snapshot in snapshots {
+        for symbol in &snapshot.symbols {
+            if symbol.node_type == "Function" && symbol.name == "main" {
+                main_roots.push(symbol.id.clone());
+            }
+        }
+    }
+
+    let mut stmt = repository.conn.prepare(
+        "SELECT source, target
+         FROM edges
+         WHERE relation = 'CALLS'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (source, target) = row?;
+        adjacency.entry(source).or_default().push(target);
+    }
+
+    let mut inserted = 0usize;
+    for root_id in main_roots {
+        let mut visited = HashSet::<String>::new();
+        let mut queue = std::collections::VecDeque::<(String, usize)>::new();
+        visited.insert(root_id.clone());
+        queue.push_back((root_id.clone(), 0));
+
+        while let Some((current, depth)) = queue.pop_front() {
+            let Some(children) = adjacency.get(&current) else {
+                continue;
+            };
+
+            for child in children {
+                if !visited.insert(child.clone()) {
+                    continue;
+                }
+
+                let edge = EdgeRecord {
+                    source: current.clone(),
+                    target: child.clone(),
+                    relation: "MAIN_TREE".to_string(),
+                    metadata: Some(json!({
+                        "root": root_id,
+                        "depth": depth + 1
+                    }).to_string()),
+                };
+                if repository.upsert_edge(&edge)? {
+                    inserted += 1;
+                }
+
+                queue.push_back((child.clone(), depth + 1));
+            }
+        }
+    }
+
+    Ok(inserted)
+}
+
+fn compute_and_store_main_flow_tree(
+    repository: &CommitRepository,
+    snapshots: &[RustFileSnapshot],
+) -> rusqlite::Result<usize> {
+    let mut inserted = 0usize;
+    let mut functions_by_file = HashMap::<String, Vec<String>>::new();
+    let mut function_file_by_id = HashMap::<String, String>::new();
+    let mut entry_files = Vec::<String>::new();
+
+    for snapshot in snapshots {
+        if snapshot.file_path == "src/main.rs" || snapshot.file_path.ends_with("/main.rs") || snapshot.file_path == "main.rs" {
+            entry_files.push(snapshot.file_path.clone());
+        }
+
+        let function_ids = snapshot
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.node_type == "Function")
+            .map(|symbol| {
+                function_file_by_id.insert(symbol.id.clone(), snapshot.file_path.clone());
+                symbol.id.clone()
+            })
+            .collect::<Vec<_>>();
+
+        if !function_ids.is_empty() {
+            functions_by_file.insert(snapshot.file_path.clone(), function_ids);
+        }
+    }
+
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+    let mut stmt = repository.conn.prepare(
+        "SELECT source, target
+         FROM edges
+         WHERE relation = 'CALLS'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (source, target) = row?;
+        adjacency.entry(source).or_default().push(target);
+    }
+
+    let mut discovered_files = HashSet::<String>::new();
+    let mut expanded_functions = HashSet::<String>::new();
+    let mut queue = std::collections::VecDeque::<(String, usize)>::new();
+
+    for entry_file in entry_files {
+        let entry_file_id = FileNode::from_path(&entry_file).id;
+        discovered_files.insert(entry_file.clone());
+
+        if let Some(functions) = functions_by_file.get(&entry_file) {
+            for function_id in functions {
+                let edge = EdgeRecord {
+                    source: entry_file_id.clone(),
+                    target: function_id.clone(),
+                    relation: "MAIN_FLOW".to_string(),
+                    metadata: Some(json!({
+                        "kind": "file_to_function",
+                        "depth": 1,
+                        "entry_file": entry_file
+                    }).to_string()),
+                };
+                if repository.upsert_edge(&edge)? {
+                    inserted += 1;
+                }
+                queue.push_back((function_id.clone(), 1));
+            }
+        }
+    }
+
+    while let Some((function_id, depth)) = queue.pop_front() {
+        if !expanded_functions.insert(function_id.clone()) {
+            continue;
+        }
+
+        let Some(targets) = adjacency.get(&function_id) else {
+            continue;
+        };
+
+        for target_function_id in targets {
+            let Some(target_file) = function_file_by_id.get(target_function_id).cloned() else {
+                continue;
+            };
+
+            let function_to_file_edge = EdgeRecord {
+                source: function_id.clone(),
+                target: FileNode::from_path(&target_file).id,
+                relation: "MAIN_FLOW".to_string(),
+                metadata: Some(json!({
+                    "kind": "function_to_file",
+                    "depth": depth + 1,
+                    "target_file": target_file
+                }).to_string()),
+            };
+            if repository.upsert_edge(&function_to_file_edge)? {
+                inserted += 1;
+            }
+
+            if discovered_files.insert(target_file.clone()) {
+                if let Some(file_functions) = functions_by_file.get(&target_file) {
+                    for file_function_id in file_functions {
+                        let file_to_function_edge = EdgeRecord {
+                            source: FileNode::from_path(&target_file).id,
+                            target: file_function_id.clone(),
+                            relation: "MAIN_FLOW".to_string(),
+                            metadata: Some(json!({
+                                "kind": "file_to_function",
+                                "depth": depth + 2,
+                                "from_file": target_file
+                            }).to_string()),
+                        };
+                        if repository.upsert_edge(&file_to_function_edge)? {
+                            inserted += 1;
+                        }
+                        queue.push_back((file_function_id.clone(), depth + 2));
+                    }
+                }
+            } else {
+                queue.push_back((target_function_id.clone(), depth + 1));
+            }
+        }
+    }
+
+    Ok(inserted)
 }
 
 fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<DirectoryNode>, Vec<EdgeRecord>) {
@@ -2388,6 +2606,153 @@ fn a() {
             .expect("cross-file calls edge count should succeed");
 
         assert_eq!(cross_file_call_count, 1);
+    }
+
+    #[test]
+    fn build_graph_extracts_main_tree_edges_from_same_file_calls() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["initial"]);
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+
+        let rust_source = r#"
+fn child() {}
+
+fn main() {
+    child();
+}
+"#;
+
+        std::fs::write(src_dir.join("tree.rs"), rust_source).expect("rust file should be written");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let main_id = rust_function_symbol_id("src/tree.rs", "main", 4);
+        let child_id = rust_function_symbol_id("src/tree.rs", "child", 2);
+
+        let main_tree_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MAIN_TREE' AND source = ?1 AND target = ?2",
+                params![main_id, child_id],
+                |row| row.get(0),
+            )
+            .expect("main tree edge count should succeed");
+
+        assert_eq!(main_tree_count, 1);
+    }
+
+    #[test]
+    fn build_graph_extracts_main_tree_edges_across_files() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-main-tree",
+            &[
+                (
+                    "src/main.rs",
+                    "mod helper;\n\nfn main() {\n    helper::run();\n}\n",
+                ),
+                (
+                    "src/helper.rs",
+                    "pub fn run() {\n    leaf();\n}\n\nfn leaf() {}\n",
+                ),
+            ],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+        let main_id = rust_function_symbol_id("src/main.rs", "main", 3);
+        let run_id = rust_function_symbol_id("src/helper.rs", "run", 1);
+        let leaf_id = rust_function_symbol_id("src/helper.rs", "leaf", 5);
+
+        let main_to_run_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MAIN_TREE' AND source = ?1 AND target = ?2",
+                params![main_id, run_id],
+                |row| row.get(0),
+            )
+            .expect("main to run edge count should succeed");
+        let run_to_leaf_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MAIN_TREE' AND source = ?1 AND target = ?2",
+                params![run_id, leaf_id],
+                |row| row.get(0),
+            )
+            .expect("run to leaf edge count should succeed");
+
+        assert_eq!(main_to_run_count, 1);
+        assert_eq!(run_to_leaf_count, 1);
+    }
+
+    #[test]
+    fn build_graph_extracts_main_flow_file_function_file_structure() {
+        let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
+
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "add-main-flow",
+            &[
+                (
+                    "src/main.rs",
+                    "mod helper;\n\nfn aux() {}\n\nfn main() {\n    helper::run();\n}\n",
+                ),
+                (
+                    "src/helper.rs",
+                    "pub fn run() {\n    leaf();\n}\n\nfn leaf() {}\nfn other() {}\n",
+                ),
+            ],
+        );
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+        let db = Connection::open(report.db_path).expect("db should open");
+
+        let main_file_id = FileNode::from_path("src/main.rs").id;
+        let helper_file_id = FileNode::from_path("src/helper.rs").id;
+        let aux_id = rust_function_symbol_id("src/main.rs", "aux", 3);
+        let main_id = rust_function_symbol_id("src/main.rs", "main", 5);
+        let run_id = rust_function_symbol_id("src/helper.rs", "run", 1);
+        let leaf_id = rust_function_symbol_id("src/helper.rs", "leaf", 5);
+        let other_id = rust_function_symbol_id("src/helper.rs", "other", 6);
+
+        let main_file_to_main_functions: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE relation = 'MAIN_FLOW'
+                   AND source = ?1
+                   AND target IN (?2, ?3)",
+                params![main_file_id, aux_id, main_id],
+                |row| row.get(0),
+            )
+            .expect("main file to functions count should succeed");
+        let main_to_helper_file: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE relation = 'MAIN_FLOW'
+                   AND source = ?1
+                   AND target = ?2",
+                params![main_id, helper_file_id.clone()],
+                |row| row.get(0),
+            )
+            .expect("main to helper file count should succeed");
+        let helper_file_to_functions: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges
+                 WHERE relation = 'MAIN_FLOW'
+                   AND source = ?1
+                   AND target IN (?2, ?3, ?4)",
+                params![helper_file_id, run_id, leaf_id, other_id],
+                |row| row.get(0),
+            )
+            .expect("helper file to functions count should succeed");
+
+        assert_eq!(main_file_to_main_functions, 2);
+        assert_eq!(main_to_helper_file, 1);
+        assert_eq!(helper_file_to_functions, 3);
     }
 
     #[test]
