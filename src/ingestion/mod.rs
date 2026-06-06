@@ -381,10 +381,8 @@ impl CommitRepository {
     }
 
     pub fn remove_edges_by_relation(&self, relation: &str) -> rusqlite::Result<usize> {
-        self.conn.execute(
-            "DELETE FROM edges WHERE relation = ?1",
-            params![relation],
-        )
+        self.conn
+            .execute("DELETE FROM edges WHERE relation = ?1", params![relation])
     }
 
     pub fn node_count_by_type(&self, node_type: &str) -> rusqlite::Result<usize> {
@@ -435,7 +433,12 @@ impl CommitRepository {
         Ok(rows_affected > 0)
     }
 
-    pub fn has_metadata(&self, entity_type: &str, entity_id: &str, key: &str) -> rusqlite::Result<bool> {
+    pub fn has_metadata(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+        key: &str,
+    ) -> rusqlite::Result<bool> {
         self.conn
             .query_row(
                 "SELECT 1
@@ -496,7 +499,8 @@ impl CommitRepository {
             raw_rows.push((file.id.clone(), file.name.clone(), churn_score));
         }
 
-        churn_scores.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        churn_scores
+            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let len = churn_scores.len();
         let low_threshold = churn_scores[(len.saturating_sub(1) * 33) / 100];
         let high_threshold = churn_scores[(len.saturating_sub(1) * 66) / 100];
@@ -550,7 +554,8 @@ impl CommitRepository {
 
         for function in &functions {
             let file_path = extract_file_path_from_metadata(&function.metadata);
-            let function_commit_score = self.get_time_decay_commit_score(&function.id, "MODIFIED")?;
+            let function_commit_score =
+                self.get_time_decay_commit_score(&function.id, "MODIFIED")?;
             let call_degree = self.get_function_call_degree(&function.id)?;
             let churn_score = function_commit_score;
             churn_scores.push(churn_score);
@@ -566,7 +571,8 @@ impl CommitRepository {
             });
         }
 
-        churn_scores.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        churn_scores
+            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
         let len = churn_scores.len();
         let low_threshold = churn_scores[(len.saturating_sub(1) * 33) / 100];
         let high_threshold = churn_scores[(len.saturating_sub(1) * 66) / 100];
@@ -642,21 +648,30 @@ impl CommitRepository {
         Ok(directories)
     }
 
-    fn update_file_activity_statuses(&self, active_paths: &HashSet<String>) -> rusqlite::Result<()> {
+    fn update_file_activity_statuses(
+        &self,
+        active_paths: &HashSet<String>,
+    ) -> rusqlite::Result<()> {
         let files = self.get_all_files()?;
         for file in files {
-            let file_node = FileNode::from_path_with_status(&file.name, active_paths.contains(&file.name));
+            let file_node =
+                FileNode::from_path_with_status(&file.name, active_paths.contains(&file.name));
             let _ = self.upsert_file_node(&file_node)?;
         }
 
         Ok(())
     }
 
-    fn update_directory_activity_statuses(&self, active_paths: &HashSet<String>) -> rusqlite::Result<()> {
+    fn update_directory_activity_statuses(
+        &self,
+        active_paths: &HashSet<String>,
+    ) -> rusqlite::Result<()> {
         let directories = self.get_all_directories()?;
         for directory in directories {
-            let directory_node =
-                DirectoryNode::from_path_with_status(&directory.name, active_paths.contains(&directory.name));
+            let directory_node = DirectoryNode::from_path_with_status(
+                &directory.name,
+                active_paths.contains(&directory.name),
+            );
             let _ = self.upsert_directory_node(&directory_node)?;
         }
 
@@ -684,7 +699,10 @@ impl CommitRepository {
         Ok(functions)
     }
 
-    fn update_function_activity_statuses(&self, active_function_ids: &HashSet<String>) -> rusqlite::Result<()> {
+    fn update_function_activity_statuses(
+        &self,
+        active_function_ids: &HashSet<String>,
+    ) -> rusqlite::Result<()> {
         let functions = self.get_all_functions()?;
         for function in functions {
             let is_active = active_function_ids.contains(&function.id);
@@ -730,7 +748,11 @@ impl CommitRepository {
         )
     }
 
-    fn get_time_decay_commit_score(&self, target_id: &str, relation: &str) -> rusqlite::Result<f64> {
+    fn get_time_decay_commit_score(
+        &self,
+        target_id: &str,
+        relation: &str,
+    ) -> rusqlite::Result<f64> {
         let now = current_unix_seconds();
         let half_life = hotspot_half_life_days();
         let mut stmt = self.conn.prepare(
@@ -946,6 +968,7 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     revwalk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
 
     let _ = repository.remove_file_to_function_contains_edges()?;
+    let _ = repository.remove_edges_by_relation("CALLS")?;
     let _ = repository.remove_edges_by_relation("MAIN_TREE")?;
     let _ = repository.remove_edges_by_relation("MAIN_FLOW")?;
 
@@ -1004,7 +1027,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                 file_nodes_inserted += 1;
             }
 
-            let (directory_nodes, contains_edges) = build_directory_hierarchy(&file_path, &file_node.id);
+            let (directory_nodes, contains_edges) =
+                build_directory_hierarchy(&file_path, &file_node.id);
             for directory_node in directory_nodes {
                 if repository.upsert_directory_node(&directory_node)? {
                     directory_nodes_inserted += 1;
@@ -1047,7 +1071,9 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
             .collect::<HashSet<_>>();
         let current_directory_paths = repo_files
             .iter()
-            .flat_map(|path| collect_parent_directory_paths(path.strip_prefix(workdir).unwrap_or(path)))
+            .flat_map(|path| {
+                collect_parent_directory_paths(path.strip_prefix(workdir).unwrap_or(path))
+            })
             .collect::<HashSet<_>>();
         repository.update_file_activity_statuses(&current_file_paths)?;
         repository.update_directory_activity_statuses(&current_directory_paths)?;
@@ -1412,7 +1438,8 @@ fn extract_file_path_from_metadata(metadata: &str) -> String {
 }
 
 fn set_function_status_in_metadata(metadata: &str, is_active: bool) -> String {
-    let mut parsed = serde_json::from_str::<serde_json::Value>(metadata).unwrap_or_else(|_| json!({}));
+    let mut parsed =
+        serde_json::from_str::<serde_json::Value>(metadata).unwrap_or_else(|_| json!({}));
     if let Some(object) = parsed.as_object_mut() {
         object.insert("is_active".to_string(), json!(is_active));
         object.insert("deleted".to_string(), json!(!is_active));
@@ -1474,7 +1501,7 @@ fn extract_rust_function_calls(
     function_id_by_file_and_name: &HashMap<String, Vec<String>>,
 ) -> Result<Vec<EdgeRecord>, regex::Error> {
     let fn_decl_re = Regex::new(
-        r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"^\s*(?:pub(?:\([^\)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
     )?;
     let call_re = Regex::new(r"\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(")?;
 
@@ -1519,7 +1546,8 @@ fn extract_rust_function_calls(
                 for caps in call_re.captures_iter(line) {
                     if let Some(name_match) = caps.get(1) {
                         let callee_name = name_match.as_str();
-                        let targets = resolve_called_function_ids(callee_name, function_ids_by_name);
+                        let targets =
+                            resolve_called_function_ids(callee_name, function_ids_by_name);
                         if targets.len() == 1 {
                             let target_id = &targets[0];
                             if source_id == target_id {
@@ -1532,11 +1560,14 @@ fn extract_rust_function_calls(
                                     source: key.0,
                                     target: key.1,
                                     relation: "CALLS".to_string(),
-                                    metadata: Some(json!({
-                                        "file": file_path,
-                                        "line": line_number,
-                                        "callee": callee_name
-                                    }).to_string()),
+                                    metadata: Some(
+                                        json!({
+                                            "file": file_path,
+                                            "line": line_number,
+                                            "callee": callee_name
+                                        })
+                                        .to_string(),
+                                    ),
                                 });
                             }
                         }
@@ -1563,7 +1594,7 @@ fn compute_and_store_main_tree(
     repository: &CommitRepository,
     snapshots: &[RustFileSnapshot],
 ) -> rusqlite::Result<usize> {
-    let mut adjacency = HashMap::<String, Vec<String>>::new();
+    let adjacency = get_active_call_adjacency(repository)?;
     let mut main_roots = Vec::<String>::new();
 
     for snapshot in snapshots {
@@ -1572,20 +1603,6 @@ fn compute_and_store_main_tree(
                 main_roots.push(symbol.id.clone());
             }
         }
-    }
-
-    let mut stmt = repository.conn.prepare(
-        "SELECT source, target
-         FROM edges
-         WHERE relation = 'CALLS'",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-
-    for row in rows {
-        let (source, target) = row?;
-        adjacency.entry(source).or_default().push(target);
     }
 
     let mut inserted = 0usize;
@@ -1609,10 +1626,13 @@ fn compute_and_store_main_tree(
                     source: current.clone(),
                     target: child.clone(),
                     relation: "MAIN_TREE".to_string(),
-                    metadata: Some(json!({
-                        "root": root_id,
-                        "depth": depth + 1
-                    }).to_string()),
+                    metadata: Some(
+                        json!({
+                            "root": root_id,
+                            "depth": depth + 1
+                        })
+                        .to_string(),
+                    ),
                 };
                 if repository.upsert_edge(&edge)? {
                     inserted += 1;
@@ -1636,7 +1656,10 @@ fn compute_and_store_main_flow_tree(
     let mut entry_files = Vec::<String>::new();
 
     for snapshot in snapshots {
-        if snapshot.file_path == "src/main.rs" || snapshot.file_path.ends_with("/main.rs") || snapshot.file_path == "main.rs" {
+        if snapshot.file_path == "src/main.rs"
+            || snapshot.file_path.ends_with("/main.rs")
+            || snapshot.file_path == "main.rs"
+        {
             entry_files.push(snapshot.file_path.clone());
         }
 
@@ -1655,19 +1678,7 @@ fn compute_and_store_main_flow_tree(
         }
     }
 
-    let mut adjacency = HashMap::<String, Vec<String>>::new();
-    let mut stmt = repository.conn.prepare(
-        "SELECT source, target
-         FROM edges
-         WHERE relation = 'CALLS'",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    for row in rows {
-        let (source, target) = row?;
-        adjacency.entry(source).or_default().push(target);
-    }
+    let adjacency = get_active_call_adjacency(repository)?;
 
     let mut discovered_files = HashSet::<String>::new();
     let mut expanded_functions = HashSet::<String>::new();
@@ -1683,11 +1694,14 @@ fn compute_and_store_main_flow_tree(
                     source: entry_file_id.clone(),
                     target: function_id.clone(),
                     relation: "MAIN_FLOW".to_string(),
-                    metadata: Some(json!({
-                        "kind": "file_to_function",
-                        "depth": 1,
-                        "entry_file": entry_file
-                    }).to_string()),
+                    metadata: Some(
+                        json!({
+                            "kind": "file_to_function",
+                            "depth": 1,
+                            "entry_file": entry_file
+                        })
+                        .to_string(),
+                    ),
                 };
                 if repository.upsert_edge(&edge)? {
                     inserted += 1;
@@ -1715,11 +1729,14 @@ fn compute_and_store_main_flow_tree(
                 source: function_id.clone(),
                 target: FileNode::from_path(&target_file).id,
                 relation: "MAIN_FLOW".to_string(),
-                metadata: Some(json!({
-                    "kind": "function_to_file",
-                    "depth": depth + 1,
-                    "target_file": target_file
-                }).to_string()),
+                metadata: Some(
+                    json!({
+                        "kind": "function_to_file",
+                        "depth": depth + 1,
+                        "target_file": target_file
+                    })
+                    .to_string(),
+                ),
             };
             if repository.upsert_edge(&function_to_file_edge)? {
                 inserted += 1;
@@ -1732,11 +1749,14 @@ fn compute_and_store_main_flow_tree(
                             source: FileNode::from_path(&target_file).id,
                             target: file_function_id.clone(),
                             relation: "MAIN_FLOW".to_string(),
-                            metadata: Some(json!({
-                                "kind": "file_to_function",
-                                "depth": depth + 2,
-                                "from_file": target_file
-                            }).to_string()),
+                            metadata: Some(
+                                json!({
+                                    "kind": "file_to_function",
+                                    "depth": depth + 2,
+                                    "from_file": target_file
+                                })
+                                .to_string(),
+                            ),
                         };
                         if repository.upsert_edge(&file_to_function_edge)? {
                             inserted += 1;
@@ -1753,9 +1773,42 @@ fn compute_and_store_main_flow_tree(
     Ok(inserted)
 }
 
-fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<DirectoryNode>, Vec<EdgeRecord>) {
+fn get_active_call_adjacency(
+    repository: &CommitRepository,
+) -> rusqlite::Result<HashMap<String, Vec<String>>> {
+    let mut adjacency = HashMap::<String, Vec<String>>::new();
+    let mut stmt = repository.conn.prepare(
+        "SELECT e.source, e.target
+         FROM edges e
+         JOIN nodes source_node ON source_node.id = e.source
+         JOIN nodes target_node ON target_node.id = e.target
+         WHERE e.relation = 'CALLS'
+           AND source_node.type = 'Function'
+           AND target_node.type = 'Function'
+           AND COALESCE(CAST(json_extract(source_node.metadata, '$.is_active') AS INTEGER), 1) = 1
+           AND COALESCE(CAST(json_extract(target_node.metadata, '$.is_active') AS INTEGER), 1) = 1",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (source, target) = row?;
+        adjacency.entry(source).or_default().push(target);
+    }
+
+    Ok(adjacency)
+}
+
+fn build_directory_hierarchy(
+    file_path: &str,
+    file_node_id: &str,
+) -> (Vec<DirectoryNode>, Vec<EdgeRecord>) {
     let normalized = file_path.replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
 
     if parts.len() <= 1 {
         return (Vec::new(), Vec::new());
@@ -1802,7 +1855,10 @@ fn build_directory_hierarchy(file_path: &str, file_node_id: &str) -> (Vec<Direct
 
 fn collect_parent_directory_paths(file_path: &Path) -> Vec<String> {
     let normalized = file_path.to_string_lossy().replace('\\', "/");
-    let parts: Vec<&str> = normalized.split('/').filter(|part| !part.is_empty()).collect();
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
     if parts.len() <= 1 {
         return Vec::new();
     }
@@ -1853,7 +1909,10 @@ fn collect_repo_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbolNode>, regex::Error> {
+fn extract_rust_symbols(
+    file_path: &str,
+    content: &str,
+) -> Result<Vec<RustSymbolNode>, regex::Error> {
     let struct_re = Regex::new(r"^\s*(pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)")?;
     let trait_re = Regex::new(r"^\s*(pub\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)")?;
     let impl_re = Regex::new(r"^\s*impl(?:<[^>]+>)?\s+([A-Za-z_][A-Za-z0-9_]*)")?;
@@ -1884,7 +1943,12 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
 
         if let Some(caps) = struct_re.captures(line) {
             if let Some(name_match) = caps.get(2) {
-                let symbol = RustSymbolNode::new(RustSymbolKind::Struct, file_path, name_match.as_str(), line_number);
+                let symbol = RustSymbolNode::new(
+                    RustSymbolKind::Struct,
+                    file_path,
+                    name_match.as_str(),
+                    line_number,
+                );
                 if seen.insert(symbol.id.clone()) {
                     symbols.push(symbol);
                 }
@@ -1893,7 +1957,12 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
 
         if let Some(caps) = trait_re.captures(line) {
             if let Some(name_match) = caps.get(2) {
-                let symbol = RustSymbolNode::new(RustSymbolKind::Interface, file_path, name_match.as_str(), line_number);
+                let symbol = RustSymbolNode::new(
+                    RustSymbolKind::Interface,
+                    file_path,
+                    name_match.as_str(),
+                    line_number,
+                );
                 if seen.insert(symbol.id.clone()) {
                     symbols.push(symbol);
                 }
@@ -1903,7 +1972,8 @@ fn extract_rust_symbols(file_path: &str, content: &str) -> Result<Vec<RustSymbol
         if let Some(caps) = impl_re.captures(line) {
             if let Some(name_match) = caps.get(1) {
                 let class_name = format!("impl {}", name_match.as_str());
-                let symbol = RustSymbolNode::new(RustSymbolKind::Class, file_path, &class_name, line_number);
+                let symbol =
+                    RustSymbolNode::new(RustSymbolKind::Class, file_path, &class_name, line_number);
                 if seen.insert(symbol.id.clone()) {
                     symbols.push(symbol);
                 }
@@ -2047,7 +2117,11 @@ fn index_commit_function_edges_for_commit(
 
     let mut options = git2::DiffOptions::new();
     let diff = if let Some(parent_tree_ref) = parent_tree.as_ref() {
-        repo.diff_tree_to_tree(Some(parent_tree_ref), Some(&commit_tree), Some(&mut options))?
+        repo.diff_tree_to_tree(
+            Some(parent_tree_ref),
+            Some(&commit_tree),
+            Some(&mut options),
+        )?
     } else {
         repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut options))?
     };
@@ -2087,16 +2161,18 @@ fn index_commit_function_edges_for_commit(
             None => None,
         };
 
-        let old_functions = if let (Some(path), Some(content)) = (old_path.as_deref(), old_content.as_deref()) {
-            extract_rust_function_spans(path, content)?
-        } else {
-            Vec::new()
-        };
-        let new_functions = if let (Some(path), Some(content)) = (new_path.as_deref(), new_content.as_deref()) {
-            extract_rust_function_spans(path, content)?
-        } else {
-            Vec::new()
-        };
+        let old_functions =
+            if let (Some(path), Some(content)) = (old_path.as_deref(), old_content.as_deref()) {
+                extract_rust_function_spans(path, content)?
+            } else {
+                Vec::new()
+            };
+        let new_functions =
+            if let (Some(path), Some(content)) = (new_path.as_deref(), new_content.as_deref()) {
+                extract_rust_function_spans(path, content)?
+            } else {
+                Vec::new()
+            };
 
         upsert_historical_function_nodes(repository, &old_functions, current_function_ids)?;
         upsert_historical_function_nodes(repository, &new_functions, current_function_ids)?;
@@ -2366,7 +2442,11 @@ mod tests {
             )
             .expect("author count should succeed");
         let file_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'File'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'File'",
+                [],
+                |row| row.get(0),
+            )
             .expect("file count should succeed");
         let _directory_count: i64 = db
             .query_row(
@@ -2434,7 +2514,11 @@ mod tests {
 
         let db = Connection::open(second.db_path).expect("db should open");
         let commit_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Commit'",
+                [],
+                |row| row.get(0),
+            )
             .expect("commit count query should succeed");
         let authored_by_count: i64 = db
             .query_row(
@@ -2495,7 +2579,8 @@ fn helper() {}
 fn resolve_graph_db_path() {}
 "#;
 
-        std::fs::write(src_dir.join("single.rs"), rust_source).expect("rust file should be written");
+        std::fs::write(src_dir.join("single.rs"), rust_source)
+            .expect("rust file should be written");
 
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
@@ -2512,7 +2597,10 @@ fn resolve_graph_db_path() {}
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("metadata should parse");
 
         assert_eq!(
-            parsed.get("churn_score").and_then(serde_json::Value::as_f64).unwrap_or(-1.0),
+            parsed
+                .get("churn_score")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(-1.0),
             0.0
         );
         assert_eq!(
@@ -3057,7 +3145,10 @@ impl B {
             &repo,
             temp_dir.path(),
             "add-functions",
-            &[("src/lib.rs", "fn allocate() {\n    let _x = 1;\n}\n\nfn evict() {\n    let _y = 2;\n}\n")],
+            &[(
+                "src/lib.rs",
+                "fn allocate() {\n    let _x = 1;\n}\n\nfn evict() {\n    let _y = 2;\n}\n",
+            )],
         );
         commit_files(
             &repo,
@@ -3081,9 +3172,18 @@ impl B {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&metadata_raw).expect("metadata should parse");
-        assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            parsed.get("delete").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("deleted").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("is_active").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
@@ -3113,9 +3213,18 @@ impl B {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&metadata_raw).expect("metadata should parse");
-        assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            parsed.get("delete").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("deleted").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("is_active").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
@@ -3126,9 +3235,17 @@ impl B {
             &repo,
             temp_dir.path(),
             "add-nested-file",
-            &[("test/function_diff_overlap/case.rs", "fn temp() {\n    let _x = 1;\n}\n")],
+            &[(
+                "test/function_diff_overlap/case.rs",
+                "fn temp() {\n    let _x = 1;\n}\n",
+            )],
         );
-        delete_and_commit_files(&repo, temp_dir.path(), "delete-nested-file", &["test/function_diff_overlap/case.rs"]);
+        delete_and_commit_files(
+            &repo,
+            temp_dir.path(),
+            "delete-nested-file",
+            &["test/function_diff_overlap/case.rs"],
+        );
 
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
@@ -3145,9 +3262,18 @@ impl B {
 
         let parsed: serde_json::Value =
             serde_json::from_str(&metadata_raw).expect("metadata should parse");
-        assert_eq!(parsed.get("delete").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(parsed.get("deleted").and_then(serde_json::Value::as_bool), Some(true));
-        assert_eq!(parsed.get("is_active").and_then(serde_json::Value::as_bool), Some(false));
+        assert_eq!(
+            parsed.get("delete").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("deleted").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            parsed.get("is_active").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]
@@ -3159,7 +3285,10 @@ impl B {
 
         let state_path = temp_dir.path().join(".repodna").join("state.json");
         assert!(state_path.exists());
-        assert_eq!(report.db_path, temp_dir.path().join(".repodna").join("graph.db"));
+        assert_eq!(
+            report.db_path,
+            temp_dir.path().join(".repodna").join("graph.db")
+        );
 
         let raw = std::fs::read_to_string(state_path).expect("state file should be readable");
         let parsed: serde_json::Value =
@@ -3172,7 +3301,9 @@ impl B {
             .to_string();
 
         assert_eq!(
-            parsed.get("last_built_commit").and_then(serde_json::Value::as_str),
+            parsed
+                .get("last_built_commit")
+                .and_then(serde_json::Value::as_str),
             Some(expected_head.as_str())
         );
     }
@@ -3185,17 +3316,30 @@ impl B {
             .expect("initial build should succeed");
         let first_db = Connection::open(first.db_path).expect("db should open");
         let first_commit_count: i64 = first_db
-            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Commit'",
+                [],
+                |row| row.get(0),
+            )
             .expect("commit count should succeed");
         assert_eq!(first_commit_count, 1);
 
-        commit_files(&repo, temp_dir.path(), "after-base", &[("src/lib.rs", "fn run() {}\n")]);
+        commit_files(
+            &repo,
+            temp_dir.path(),
+            "after-base",
+            &[("src/lib.rs", "fn run() {}\n")],
+        );
 
         let report = update_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("update should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
         let commit_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Commit'",
+                [],
+                |row| row.get(0),
+            )
             .expect("commit count should succeed");
 
         assert_eq!(commit_count, 2);
@@ -3210,8 +3354,14 @@ impl B {
             .expect("head should exist")
             .target()
             .expect("head target should exist");
-        repo.branch("feature", &repo.find_commit(base_oid).expect("base commit should exist"), false)
-            .expect("branch should be created");
+        repo.branch(
+            "feature",
+            &repo
+                .find_commit(base_oid)
+                .expect("base commit should exist"),
+            false,
+        )
+        .expect("branch should be created");
 
         checkout_branch(&repo, "feature");
         commit_files(
@@ -3237,7 +3387,11 @@ impl B {
         let db = Connection::open(report.db_path).expect("db should open");
 
         let commit_count: i64 = db
-            .query_row("SELECT COUNT(*) FROM nodes WHERE type = 'Commit'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Commit'",
+                [],
+                |row| row.get(0),
+            )
             .expect("commit count should succeed");
         let feature_commit_count: i64 = db
             .query_row(
@@ -3284,8 +3438,15 @@ impl B {
                     .find_commit(head.target().expect("head oid should exist"))
                     .expect("parent commit should be found");
 
-                repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[&parent])
-                    .expect("commit should succeed");
+                repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[&parent],
+                )
+                .expect("commit should succeed");
             } else {
                 repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])
                     .expect("initial commit should succeed");
@@ -3416,6 +3577,7 @@ impl B {
             .expect("branch object should exist");
         repo.checkout_tree(&object, None)
             .expect("checkout tree should succeed");
-        repo.set_head(&reference_name).expect("set head should succeed");
+        repo.set_head(&reference_name)
+            .expect("set head should succeed");
     }
 }

@@ -1205,12 +1205,21 @@
 
         if (insights.function_insights) {
           lines.push("");
+          lines.push(`Function: ${insights.function_insights.function_name}`);
           lines.push(`Function file: ${insights.function_insights.file}`);
           lines.push(`Function line: ${insights.function_insights.line}`);
           if (isDeletedNode(insights.node)) {
             lines.push("Function status: Deleted");
           }
           lines.push(`Function changes found: ${insights.function_insights.commit_count}`);
+          if (Array.isArray(insights.function_insights.neighbors) && insights.function_insights.neighbors.length > 0) {
+            lines.push(`Neighbors: ${insights.function_insights.neighbors.join(", ")}`);
+          }
+          if (insights.function_insights.code) {
+            lines.push("");
+            lines.push("Code:");
+            lines.push(insights.function_insights.code);
+          }
           if (Array.isArray(insights.function_insights.modifying_authors) && insights.function_insights.modifying_authors.length > 0) {
             lines.push("Modifying authors:");
             insights.function_insights.modifying_authors.slice(0, 5).forEach((entry) => {
@@ -1218,8 +1227,8 @@
             });
           }
 
-          if (Array.isArray(insights.function_insights.changes) && insights.function_insights.changes.length > 0) {
-            state.functionCommitChanges = insights.function_insights.changes;
+          if (Array.isArray(insights.function_insights.recent_commits) && insights.function_insights.recent_commits.length > 0) {
+            state.functionCommitChanges = insights.function_insights.recent_commits;
             state.selectedFunctionCommitIndex = 0;
             lines.push("Use Prev/Next to browse function commits.");
             selectedMetaEl.textContent = lines.join("\n");

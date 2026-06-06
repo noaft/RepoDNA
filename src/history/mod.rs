@@ -124,7 +124,11 @@ fn collect_commit_diffs_from_repository(repo: &Repository) -> Result<String, git
         let diff = if commit.parent_count() > 0 {
             let parent = commit.parent(0)?;
             let parent_tree = parent.tree()?;
-            repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), Some(&mut diff_options))?
+            repo.diff_tree_to_tree(
+                Some(&parent_tree),
+                Some(&commit_tree),
+                Some(&mut diff_options),
+            )?
         } else {
             repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut diff_options))?
         };
@@ -210,7 +214,11 @@ mod tests {
 
         assert!(!lines.is_empty());
         assert!(lines[0].starts_with("Scanning git history:"));
-        assert!(lines.iter().any(|line| line.contains("first") || line.contains("second")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("first") || line.contains("second"))
+        );
     }
 
     #[test]
@@ -259,8 +267,15 @@ mod tests {
                     .find_commit(head.target().expect("head oid should exist"))
                     .expect("parent commit should be found");
 
-                repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[&parent])
-                    .expect("commit should succeed");
+                repo.commit(
+                    Some("HEAD"),
+                    &signature,
+                    &signature,
+                    message,
+                    &tree,
+                    &[&parent],
+                )
+                .expect("commit should succeed");
             } else {
                 repo.commit(Some("HEAD"), &signature, &signature, message, &tree, &[])
                     .expect("initial commit should succeed");
