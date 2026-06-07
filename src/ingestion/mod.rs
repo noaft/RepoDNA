@@ -1,3 +1,4 @@
+use crate::repodna_paths;
 use git2::{Repository, Sort};
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -1012,8 +1013,9 @@ impl IngestionReport {
 /// - Skips duplicates via conflict-safe upserts.
 pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
     let repo = Repository::discover(repo_path)?;
-    let db_path = resolve_graph_db_path(&repo);
-    ensure_repodna_dir(&repo)?;
+    repodna_paths::validate_storage_configuration(&repo)?;
+    let db_path = repodna_paths::resolve_graph_db_path(&repo);
+    repodna_paths::ensure_storage_dir(&repo)?;
     let repository = CommitRepository::open(&db_path)?;
 
     let mut revwalk = repo.revwalk()?;
@@ -1387,8 +1389,9 @@ fn rust_symbol_id(node_type: &str, file_path: &str, symbol_name: &str) -> String
 
 pub fn update_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
     let repo = Repository::discover(repo_path)?;
-    let db_path = resolve_graph_db_path(&repo);
-    ensure_repodna_dir(&repo)?;
+    repodna_paths::validate_storage_configuration(&repo)?;
+    let db_path = repodna_paths::resolve_graph_db_path(&repo);
+    repodna_paths::ensure_storage_dir(&repo)?;
 
     let state = read_repodna_state(&repo)?;
     let current_head = repo
@@ -1438,8 +1441,9 @@ pub fn update_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::err
 
 pub fn rebuild_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
     let repo = Repository::discover(repo_path)?;
-    let db_path = resolve_graph_db_path(&repo);
-    ensure_repodna_dir(&repo)?;
+    repodna_paths::validate_storage_configuration(&repo)?;
+    let db_path = repodna_paths::resolve_graph_db_path(&repo);
+    repodna_paths::ensure_storage_dir(&repo)?;
     if db_path.exists() {
         fs::remove_file(&db_path)?;
     }
@@ -2415,38 +2419,8 @@ fn read_file_content_from_tree(
     Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
 }
 
-fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
-    if let Some(workdir) = repo.workdir() {
-        return workdir.join(".repodna").join("graph.db");
-    }
-
-    if let Some(repo_root) = repo.path().parent() {
-        return repo_root.join(".repodna").join("graph.db");
-    }
-
-    PathBuf::from(".repodna").join("graph.db")
-}
-
-fn resolve_repodna_dir(repo: &Repository) -> PathBuf {
-    if let Some(workdir) = repo.workdir() {
-        return workdir.join(".repodna");
-    }
-
-    if let Some(repo_root) = repo.path().parent() {
-        return repo_root.join(".repodna");
-    }
-
-    PathBuf::from(".repodna")
-}
-
-fn ensure_repodna_dir(repo: &Repository) -> io::Result<PathBuf> {
-    let dir = resolve_repodna_dir(repo);
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
 fn write_repodna_state(repo: &Repository) -> io::Result<()> {
-    let dir = ensure_repodna_dir(repo)?;
+    repodna_paths::ensure_storage_dir(repo)?;
     let head = repo.head().ok();
     let head_sha = head
         .as_ref()
@@ -2466,11 +2440,11 @@ fn write_repodna_state(repo: &Repository) -> io::Result<()> {
     let raw = serde_json::to_string(&state)
         .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
 
-    fs::write(dir.join("state.json"), raw)
+    fs::write(repodna_paths::resolve_state_path(repo), raw)
 }
 
 fn read_repodna_state(repo: &Repository) -> io::Result<RepoDnaState> {
-    let path = resolve_repodna_dir(repo).join("state.json");
+    let path = repodna_paths::resolve_state_path(repo);
     if !path.exists() {
         return Ok(RepoDnaState::default());
     }
@@ -3352,11 +3326,11 @@ impl B {
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
 
-        let state_path = temp_dir.path().join(".repodna").join("state.json");
+        let state_path = crate::repodna_paths::resolve_state_path(&repo);
         assert!(state_path.exists());
         assert_eq!(
             report.db_path,
-            temp_dir.path().join(".repodna").join("graph.db")
+            crate::repodna_paths::resolve_graph_db_path(&repo)
         );
 
         let raw = std::fs::read_to_string(state_path).expect("state file should be readable");

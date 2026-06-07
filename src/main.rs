@@ -3,7 +3,7 @@ use std::env;
 mod api;
 mod history;
 mod ingestion;
-use std::path::PathBuf;
+mod repodna_paths;
 
 /// Entry point for RepoDNA CLI.
 ///
@@ -188,13 +188,7 @@ fn main() {
             }
         };
 
-        let db_path = if let Some(workdir) = repo.workdir() {
-            workdir.join(".repodna").join("graph.db")
-        } else if let Some(root) = repo.path().parent() {
-            root.join(".repodna").join("graph.db")
-        } else {
-            PathBuf::from(".repodna").join("graph.db")
-        };
+        let db_path = repodna_paths::resolve_graph_db_path(&repo);
 
         let runtime = match tokio::runtime::Builder::new_multi_thread()
             .enable_all()

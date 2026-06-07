@@ -1,5 +1,7 @@
 use anyhow::{Context, Result, bail};
 use git2::Repository;
+#[path = "../repodna_paths.rs"]
+mod repodna_paths;
 use rmcp::{
     Json, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -63,7 +65,8 @@ async fn main() -> Result<()> {
     let repo_path = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
     let repo = Repository::discover(&repo_path)
         .with_context(|| format!("failed to discover repository from '{}'", repo_path))?;
-    let db_path = resolve_graph_db_path(&repo);
+    repodna_paths::validate_storage_configuration(&repo)?;
+    let db_path = repodna_paths::resolve_graph_db_path(&repo);
 
     if !db_path.exists() {
         bail!(
@@ -125,16 +128,4 @@ fn search_function_nodes(
     }
 
     Ok(items)
-}
-
-fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
-    if let Some(workdir) = repo.workdir() {
-        return workdir.join(".repodna").join("graph.db");
-    }
-
-    if let Some(repo_root) = repo.path().parent() {
-        return repo_root.join(".repodna").join("graph.db");
-    }
-
-    PathBuf::from(".repodna").join("graph.db")
 }
