@@ -2,10 +2,14 @@
 name = "RepoDNA"
 version = "0.1.0"
 edition = "2024"
+default-run = "RepoDNA"
 
 [dependencies]
+anyhow = "1"
 git2 = "0.19"
+rmcp = { version = "0.16.0", features = ["server", "transport-io"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+schemars = "0.8"
 serde_json = "1"
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
