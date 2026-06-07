@@ -1166,6 +1166,7 @@
         lines.push(`ID: ${insights.node.id}`);
         lines.push(`Type: ${insights.node.type}`);
         lines.push(`Name: ${insights.node.name}`);
+        lines.push(`Summary: ${insights.node.summary || ""}`);
 
         if (insights.file_insights) {
           lines.push("");
@@ -1214,11 +1215,6 @@
           lines.push(`Function changes found: ${insights.function_insights.commit_count}`);
           if (Array.isArray(insights.function_insights.neighbors) && insights.function_insights.neighbors.length > 0) {
             lines.push(`Neighbors: ${insights.function_insights.neighbors.join(", ")}`);
-          }
-          if (insights.function_insights.code) {
-            lines.push("");
-            lines.push("Code:");
-            lines.push(insights.function_insights.code);
           }
           if (Array.isArray(insights.function_insights.modifying_authors) && insights.function_insights.modifying_authors.length > 0) {
             lines.push("Modifying authors:");

@@ -18,6 +18,7 @@ pub struct GraphApiState {
 
 #[derive(Serialize, Clone)]
 pub struct NodeRecord {
+    pub summary: String,
     pub id: String,
     pub r#type: String,
     pub name: String,
@@ -26,6 +27,7 @@ pub struct NodeRecord {
 
 #[derive(Serialize)]
 pub struct Bm25SearchResult {
+    pub summary: String,
     pub id: String,
     pub r#type: String,
     pub name: String,
@@ -99,6 +101,12 @@ pub struct BaseFunctionSearchResult {
     pub file: String,
     pub line: usize,
     pub caller_count: i64,
+}
+
+#[derive(Serialize)]
+pub struct FunctionCallByResponse {
+    pub target: NodeRecord,
+    pub callers: Vec<NodeRecord>,
 }
 
 #[derive(Serialize, Clone)]
@@ -188,6 +196,7 @@ pub fn router(db_path: PathBuf) -> Router {
         .route("/query/file-hotspots", get(get_file_hotspots))
         .route("/query/function-hotspots", get(get_function_hotspots))
         .route("/query/base-functions", get(get_base_functions))
+        .route("/query/call-by/{function}", get(get_function_call_by))
         .route("/query/co-change/{file}", get(get_co_change_files))
         .route("/health", get(health))
         .layer(cors)
@@ -217,6 +226,16 @@ fn open_connection(db_path: &Path) -> Result<Connection, (StatusCode, String)> {
     })
 }
 
+fn node_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NodeRecord> {
+    Ok(NodeRecord {
+        summary: row.get(0)?,
+        id: row.get(1)?,
+        r#type: row.get(2)?,
+        name: row.get(3)?,
+        metadata: row.get(4)?,
+    })
+}
+
 fn ensure_graph_schema(db_path: &Path) -> rusqlite::Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute_batch(
@@ -224,6 +243,7 @@ fn ensure_graph_schema(db_path: &Path) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY,
             type TEXT NOT NULL,
             name TEXT NOT NULL,
+            summary TEXT NOT NULL DEFAULT '',
             metadata TEXT
         );
 
@@ -269,6 +289,10 @@ fn ensure_graph_schema(db_path: &Path) -> rusqlite::Result<()> {
         CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts
         USING fts5(id, name, metadata, tokenize = 'unicode61');",
     )?;
+    let _ = conn.execute(
+        "ALTER TABLE nodes ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
+        [],
+    );
 
     // Keep BM25 index fresh for the current database snapshot.
     conn.execute("DELETE FROM nodes_fts", [])?;
@@ -290,18 +314,11 @@ async fn get_nodes(
 ) -> Result<Json<Vec<NodeRecord>>, (StatusCode, String)> {
     let conn = open_connection(&state.db_path)?;
     let mut stmt = conn
-        .prepare("SELECT id, type, name, metadata FROM nodes ORDER BY id")
+        .prepare("SELECT summary, id, type, name, metadata FROM nodes ORDER BY id")
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map([], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map([], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut items = Vec::new();
@@ -347,16 +364,9 @@ async fn get_node(
     let conn = open_connection(&state.db_path)?;
     let node = conn
         .query_row(
-            "SELECT id, type, name, metadata FROM nodes WHERE id = ?1",
+            "SELECT summary, id, type, name, metadata FROM nodes WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(NodeRecord {
-                    id: row.get(0)?,
-                    r#type: row.get(1)?,
-                    name: row.get(2)?,
-                    metadata: row.get(3)?,
-                })
-            },
+            node_record_from_row,
         )
         .map_err(not_found_or_internal)?;
 
@@ -384,7 +394,7 @@ async fn search_nodes(
     let pattern = format!("%{}%", term);
     let mut stmt = conn
         .prepare(
-            "SELECT id, type, name, metadata FROM nodes
+            "SELECT summary, id, type, name, metadata FROM nodes
              WHERE id LIKE ?1 OR name LIKE ?1
              ORDER BY name
              LIMIT 50",
@@ -392,14 +402,7 @@ async fn search_nodes(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![pattern], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map(params![pattern], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut items = Vec::new();
@@ -422,7 +425,7 @@ async fn search_nodes_bm25(
     let conn = open_connection(&state.db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT n.id, n.type, n.name, n.metadata, bm25(nodes_fts) AS score
+            "SELECT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata, bm25(nodes_fts) AS score
              FROM nodes_fts
              JOIN nodes n ON n.id = nodes_fts.id
              WHERE nodes_fts MATCH ?1
@@ -433,14 +436,15 @@ async fn search_nodes_bm25(
 
     let rows = stmt
         .query_map(params![term], |row| {
-            let bm25_score: f64 = row.get(4)?;
+            let bm25_score: f64 = row.get(5)?;
             let relevance = 1.0 / (1.0 + bm25_score.abs());
 
             Ok(Bm25SearchResult {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
+                summary: row.get(0)?,
+                id: row.get(1)?,
+                r#type: row.get(2)?,
+                name: row.get(3)?,
+                metadata: row.get(4)?,
                 bm25_score,
                 relevance,
             })
@@ -470,7 +474,7 @@ async fn get_files_by_commit(
     let conn = open_connection(&state.db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT n.id, n.type, n.name, n.metadata
+            "SELECT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata
              FROM edges e
              JOIN nodes n ON n.id = e.target
              WHERE e.relation = 'MODIFIES' AND e.source = ?1 AND n.type = 'File'
@@ -479,14 +483,7 @@ async fn get_files_by_commit(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![id], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map(params![id], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut files = Vec::new();
@@ -503,7 +500,7 @@ async fn get_commits_by_author(
     let conn = open_connection(&state.db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT n.id, n.type, n.name, n.metadata
+            "SELECT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata
              FROM edges e
              JOIN nodes n ON n.id = e.source
              WHERE e.relation = 'AUTHORED_BY' AND e.target = ?1 AND n.type = 'Commit'
@@ -512,14 +509,7 @@ async fn get_commits_by_author(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![id], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map(params![id], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut commits = Vec::new();
@@ -544,7 +534,7 @@ async fn get_functions_by_commit(
     let conn = open_connection(&state.db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT n.id, n.type, n.name, n.metadata
+            "SELECT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata
              FROM edges e
              JOIN nodes n ON n.id = e.target
              WHERE e.relation = 'MODIFIED' AND e.source = ?1 AND n.type = 'Function'
@@ -553,14 +543,7 @@ async fn get_functions_by_commit(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![id], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map(params![id], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut functions = Vec::new();
@@ -760,6 +743,18 @@ async fn get_base_functions(
     )?))
 }
 
+async fn get_function_call_by(
+    State(state): State<GraphApiState>,
+    AxumPath(function): AxumPath<String>,
+) -> Result<Json<FunctionCallByResponse>, (StatusCode, String)> {
+    let conn = open_connection(&state.db_path)?;
+    let Some(function_id) = resolve_function_selector_to_id(&conn, &function)? else {
+        return Err((StatusCode::NOT_FOUND, "Function not found".to_string()));
+    };
+
+    Ok(Json(get_function_call_by_from_conn(&conn, &function_id)?))
+}
+
 fn resolve_file_selector_to_id(
     conn: &Connection,
     selector: &str,
@@ -808,6 +803,52 @@ fn resolve_file_selector_to_id(
         .map_err(internal_db_error)?;
 
     Ok(by_suffix)
+}
+
+fn resolve_function_selector_to_id(
+    conn: &Connection,
+    selector: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let trimmed = selector.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let by_id: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM nodes
+             WHERE type = 'Function'
+               AND id = ?1
+               AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
+             LIMIT 1",
+            params![trimmed],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal_db_error)?;
+    if by_id.is_some() {
+        return Ok(by_id);
+    }
+
+    let exact_name: Option<String> = conn
+        .query_row(
+            "SELECT id
+             FROM nodes
+             WHERE type = 'Function'
+               AND name = ?1
+               AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
+             ORDER BY LENGTH(COALESCE(json_extract(metadata, '$.file'), '')) ASC,
+                      CAST(COALESCE(json_extract(metadata, '$.line'), 0) AS INTEGER) ASC,
+                      id ASC
+             LIMIT 1",
+            params![trimmed],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(internal_db_error)?;
+
+    Ok(exact_name)
 }
 
 fn search_base_functions_in_main_tree_from_conn(
@@ -859,13 +900,57 @@ fn search_base_functions_in_main_tree_from_conn(
     Ok(items)
 }
 
+fn get_function_call_by_from_conn(
+    conn: &Connection,
+    function_id: &str,
+) -> Result<FunctionCallByResponse, (StatusCode, String)> {
+    let target = conn
+        .query_row(
+            "SELECT summary, id, type, name, metadata
+             FROM nodes
+             WHERE id = ?1
+               AND type = 'Function'
+               AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1",
+            params![function_id],
+            node_record_from_row,
+        )
+        .map_err(not_found_or_internal)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata
+             FROM edges e
+             JOIN nodes n ON n.id = e.source
+             WHERE e.relation = 'MAIN_TREE'
+               AND e.target = ?1
+               AND n.type = 'Function'
+               AND COALESCE(CAST(json_extract(n.metadata, '$.is_active') AS INTEGER), 1) = 1
+             ORDER BY n.name ASC,
+                      LENGTH(COALESCE(json_extract(n.metadata, '$.file'), '')) ASC,
+                      CAST(COALESCE(json_extract(n.metadata, '$.line'), 0) AS INTEGER) ASC,
+                      n.id ASC",
+        )
+        .map_err(internal_db_error)?;
+
+    let rows = stmt
+        .query_map(params![function_id], node_record_from_row)
+        .map_err(internal_db_error)?;
+
+    let mut callers = Vec::new();
+    for row in rows {
+        callers.push(row.map_err(internal_db_error)?);
+    }
+
+    Ok(FunctionCallByResponse { target, callers })
+}
+
 fn get_author_ownership_from_conn(
     conn: &Connection,
     author_id: &str,
 ) -> Result<Vec<AuthorOwnershipItem>, (StatusCode, String)> {
     let mut stmt = conn
         .prepare(
-            "SELECT f.id, f.name, COUNT(*) as commit_count
+            "SELECT f.id, f.name, COUNT(*) as commit_count, COALESCE(f.summary, '')
              FROM edges authored
              JOIN edges modifies ON modifies.source = authored.source
              JOIN nodes f ON f.id = modifies.target
@@ -903,16 +988,9 @@ async fn get_node_insights(
 
     let node = conn
         .query_row(
-            "SELECT id, type, name, metadata FROM nodes WHERE id = ?1",
+            "SELECT summary, id, type, name, metadata FROM nodes WHERE id = ?1",
             params![id],
-            |row| {
-                Ok(NodeRecord {
-                    id: row.get(0)?,
-                    r#type: row.get(1)?,
-                    name: row.get(2)?,
-                    metadata: row.get(3)?,
-                })
-            },
+            node_record_from_row,
         )
         .map_err(not_found_or_internal)?;
 
@@ -998,7 +1076,7 @@ fn get_commits_by_file_from_conn(
 ) -> Result<Vec<NodeRecord>, (StatusCode, String)> {
     let mut stmt = conn
         .prepare(
-            "SELECT n.id, n.type, n.name, n.metadata
+            "SELECT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata
              FROM edges e
              JOIN nodes n ON n.id = e.source
              WHERE e.relation = 'MODIFIES' AND e.target = ?1 AND n.type = 'Commit'
@@ -1007,14 +1085,7 @@ fn get_commits_by_file_from_conn(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![file_id], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map(params![file_id], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut commits = Vec::new();
@@ -1031,7 +1102,7 @@ fn get_commits_by_function_from_conn(
 ) -> Result<Vec<NodeRecord>, (StatusCode, String)> {
     let mut stmt = conn
         .prepare(
-            "SELECT n.id, n.type, n.name, n.metadata
+            "SELECT COALESCE(n.summary, ''), n.id, n.type, n.name, n.metadata
              FROM edges e
              JOIN nodes n ON n.id = e.source
              WHERE e.relation = 'MODIFIED' AND e.target = ?1 AND n.type = 'Commit'
@@ -1041,14 +1112,7 @@ fn get_commits_by_function_from_conn(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![function_id], |row| {
-            Ok(NodeRecord {
-                id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
-            })
-        })
+        .query_map(params![function_id], node_record_from_row)
         .map_err(internal_db_error)?;
 
     let mut commits = Vec::new();
@@ -1065,16 +1129,9 @@ fn build_neighbor_response(
 ) -> Result<NeighborResponse, (StatusCode, String)> {
     let center = conn
         .query_row(
-            "SELECT id, type, name, metadata FROM nodes WHERE id = ?1",
+            "SELECT summary, id, type, name, metadata FROM nodes WHERE id = ?1",
             params![node_id],
-            |row| {
-                Ok(NodeRecord {
-                    id: row.get(0)?,
-                    r#type: row.get(1)?,
-                    name: row.get(2)?,
-                    metadata: row.get(3)?,
-                })
-            },
+            node_record_from_row,
         )
         .map_err(not_found_or_internal)?;
 
@@ -1120,16 +1177,9 @@ fn build_neighbor_response(
     for neighbor_id in neighbor_ids {
         let neighbor = conn
             .query_row(
-                "SELECT id, type, name, metadata FROM nodes WHERE id = ?1",
+                "SELECT summary, id, type, name, metadata FROM nodes WHERE id = ?1",
                 params![neighbor_id],
-                |row| {
-                    Ok(NodeRecord {
-                        id: row.get(0)?,
-                        r#type: row.get(1)?,
-                        name: row.get(2)?,
-                        metadata: row.get(3)?,
-                    })
-                },
+                node_record_from_row,
             )
             .map_err(not_found_or_internal)?;
         neighbors.push(neighbor);
@@ -1199,10 +1249,11 @@ fn get_files_by_author(
     let rows = stmt
         .query_map(params![author_id], |row| {
             Ok(NodeRecord {
+                summary: row.get(3)?,
                 id: row.get(0)?,
-                r#type: row.get(1)?,
-                name: row.get(2)?,
-                metadata: row.get(3)?,
+                r#type: "File".to_string(),
+                name: row.get(1)?,
+                metadata: None,
             })
         })
         .map_err(internal_db_error)?;
@@ -1847,5 +1898,78 @@ mod tests {
         assert_eq!(results[0].function_name, "leaf");
         assert_eq!(results[0].file, "src/lib.rs");
         assert_eq!(results[0].caller_count, 1);
+    }
+
+    #[test]
+    fn function_call_by_returns_active_main_tree_callers() {
+        let conn = Connection::open_in_memory().expect("in-memory db should open");
+        conn.execute_batch(
+            "CREATE TABLE nodes (
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                metadata TEXT
+            );
+            CREATE TABLE edges (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                metadata TEXT
+            );",
+        )
+        .expect("schema should be created");
+
+        for (id, name, metadata) in [
+            (
+                "function_main",
+                "main",
+                r#"{"file":"src/main.rs","line":1,"is_active":true}"#,
+            ),
+            (
+                "function_worker",
+                "worker",
+                r#"{"file":"src/lib.rs","line":10,"is_active":true}"#,
+            ),
+            (
+                "function_leaf",
+                "leaf",
+                r#"{"file":"src/lib.rs","line":30,"is_active":true}"#,
+            ),
+            (
+                "function_deleted_caller",
+                "old_worker",
+                r#"{"file":"src/old.rs","line":4,"is_active":false,"deleted":true}"#,
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO nodes (id, type, name, metadata) VALUES (?1, 'Function', ?2, ?3)",
+                params![id, name, metadata],
+            )
+            .expect("function node should insert");
+        }
+
+        for (source, target) in [
+            ("function_main", "function_leaf"),
+            ("function_worker", "function_leaf"),
+            ("function_deleted_caller", "function_leaf"),
+        ] {
+            conn.execute(
+                "INSERT INTO edges (source, target, relation, metadata) VALUES (?1, ?2, 'MAIN_TREE', NULL)",
+                params![source, target],
+            )
+            .expect("main tree edge should insert");
+        }
+
+        let resolved = resolve_function_selector_to_id(&conn, "leaf").expect("resolve should work");
+        assert_eq!(resolved.as_deref(), Some("function_leaf"));
+
+        let result =
+            get_function_call_by_from_conn(&conn, "function_leaf").expect("lookup should work");
+
+        assert_eq!(result.target.id, "function_leaf");
+        assert_eq!(result.callers.len(), 2);
+        assert_eq!(result.callers[0].id, "function_main");
+        assert_eq!(result.callers[1].id, "function_worker");
     }
 }

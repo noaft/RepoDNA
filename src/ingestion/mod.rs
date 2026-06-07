@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Node model for graph storage.
 pub struct CommitNode {
+    pub summary: String,
     pub id: String,
     pub node_type: String,
     pub name: String,
@@ -18,6 +19,7 @@ pub struct CommitNode {
 }
 
 pub struct AuthorNode {
+    pub summary: String,
     pub id: String,
     pub node_type: String,
     pub name: String,
@@ -25,6 +27,7 @@ pub struct AuthorNode {
 }
 
 pub struct FileNode {
+    pub summary: String,
     pub id: String,
     pub node_type: String,
     pub name: String,
@@ -32,6 +35,7 @@ pub struct FileNode {
 }
 
 pub struct DirectoryNode {
+    pub summary: String,
     pub id: String,
     pub node_type: String,
     pub name: String,
@@ -53,6 +57,7 @@ struct FileRecord {
 struct NodeRecord {
     id: String,
     name: String,
+    summary: String,
     metadata: String,
 }
 
@@ -103,6 +108,7 @@ struct FunctionSpan {
 }
 
 struct RustSymbolNode {
+    summary: String,
     id: String,
     node_type: String,
     name: String,
@@ -151,6 +157,7 @@ impl RustSymbolNode {
         .to_string();
 
         Self {
+            summary: String::new(),
             id: symbol_id,
             node_type,
             name: symbol_name.to_string(),
@@ -183,6 +190,7 @@ impl RustSymbolNode {
         .to_string();
 
         Self {
+            summary: String::new(),
             id: symbol_id,
             node_type,
             name: symbol_name.to_string(),
@@ -205,6 +213,7 @@ impl CommitNode {
         .to_string();
 
         Self {
+            summary: String::new(),
             id: format!("commit_{}", commit.id()),
             node_type: "Commit".to_string(),
             name: commit.summary().unwrap_or("<no message>").to_string(),
@@ -220,6 +229,7 @@ impl AuthorNode {
         let author_email = author.email().unwrap_or("unknown@example.com");
 
         Self {
+            summary: String::new(),
             id: format!("author_{}", sanitize_id(author_email)),
             node_type: "Author".to_string(),
             name: author_name.to_string(),
@@ -239,6 +249,7 @@ impl FileNode {
 
     pub fn from_path_with_status(path: &str, is_active: bool) -> Self {
         Self {
+            summary: String::new(),
             id: format!("file_{}", sanitize_id(path)),
             node_type: "File".to_string(),
             name: path.to_string(),
@@ -260,6 +271,7 @@ impl DirectoryNode {
 
     pub fn from_path_with_status(path: &str, is_active: bool) -> Self {
         Self {
+            summary: String::new(),
             id: format!("directory_{}", sanitize_id(path)),
             node_type: "Directory".to_string(),
             name: path.to_string(),
@@ -290,22 +302,41 @@ impl CommitRepository {
 
     /// Insert node if missing. Existing nodes are kept unchanged.
     pub fn upsert_node(&self, node: &CommitNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+        self.upsert_node_internal(
+            &node.id,
+            &node.node_type,
+            &node.name,
+            &node.summary,
+            &node.metadata,
+        )
     }
 
     pub fn upsert_author_node(&self, node: &AuthorNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(&node.id, &node.node_type, &node.name, &node.metadata)
+        self.upsert_node_internal(
+            &node.id,
+            &node.node_type,
+            &node.name,
+            &node.summary,
+            &node.metadata,
+        )
     }
 
     pub fn upsert_file_node(&self, node: &FileNode) -> rusqlite::Result<bool> {
         let rows_affected = self.conn.execute(
-            "INSERT INTO nodes (id, type, name, metadata)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  type = excluded.type,
                  name = excluded.name,
+                 summary = excluded.summary,
                  metadata = excluded.metadata",
-            params![node.id, node.node_type, node.name, node.metadata],
+            params![
+                node.id,
+                node.node_type,
+                node.name,
+                node.summary,
+                node.metadata
+            ],
         )?;
 
         Ok(rows_affected > 0)
@@ -313,13 +344,20 @@ impl CommitRepository {
 
     pub fn upsert_directory_node(&self, node: &DirectoryNode) -> rusqlite::Result<bool> {
         let rows_affected = self.conn.execute(
-            "INSERT INTO nodes (id, type, name, metadata)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  type = excluded.type,
                  name = excluded.name,
+                 summary = excluded.summary,
                  metadata = excluded.metadata",
-            params![node.id, node.node_type, node.name, node.metadata],
+            params![
+                node.id,
+                node.node_type,
+                node.name,
+                node.summary,
+                node.metadata
+            ],
         )?;
 
         Ok(rows_affected > 0)
@@ -327,13 +365,20 @@ impl CommitRepository {
 
     fn upsert_symbol_node(&self, node: &RustSymbolNode) -> rusqlite::Result<bool> {
         let rows_affected = self.conn.execute(
-            "INSERT INTO nodes (id, type, name, metadata)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  type = excluded.type,
                  name = excluded.name,
+                 summary = excluded.summary,
                  metadata = excluded.metadata",
-            params![node.id, node.node_type, node.name, node.metadata],
+            params![
+                node.id,
+                node.node_type,
+                node.name,
+                node.summary,
+                node.metadata
+            ],
         )?;
 
         Ok(rows_affected > 0)
@@ -681,13 +726,14 @@ impl CommitRepository {
     fn get_all_functions(&self) -> rusqlite::Result<Vec<NodeRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, COALESCE(metadata, '') FROM nodes WHERE type = 'Function' ORDER BY name")?;
+            .prepare("SELECT id, name, COALESCE(summary, ''), COALESCE(metadata, '') FROM nodes WHERE type = 'Function' ORDER BY name")?;
 
         let rows = stmt.query_map([], |row| {
             Ok(NodeRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                metadata: row.get(2)?,
+                summary: row.get(2)?,
+                metadata: row.get(3)?,
             })
         })?;
 
@@ -707,6 +753,7 @@ impl CommitRepository {
         for function in functions {
             let is_active = active_function_ids.contains(&function.id);
             let updated = RustSymbolNode {
+                summary: function.summary,
                 id: function.id,
                 node_type: "Function".to_string(),
                 name: function.name,
@@ -823,13 +870,14 @@ impl CommitRepository {
         id: &str,
         node_type: &str,
         name: &str,
+        summary: &str,
         metadata: &str,
     ) -> rusqlite::Result<bool> {
         let rows_affected = self.conn.execute(
-            "INSERT INTO nodes (id, type, name, metadata)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO NOTHING",
-            params![id, node_type, name, metadata],
+            params![id, node_type, name, summary, metadata],
         )?;
 
         Ok(rows_affected > 0)
@@ -841,6 +889,7 @@ impl CommitRepository {
                 id TEXT PRIMARY KEY,
                 type TEXT NOT NULL,
                 name TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
                 metadata TEXT
             );
 
@@ -882,6 +931,10 @@ impl CommitRepository {
             CREATE INDEX IF NOT EXISTS idx_metadata_key
             ON metadata(key);",
         )?;
+        let _ = self.conn.execute(
+            "ALTER TABLE nodes ADD COLUMN summary TEXT NOT NULL DEFAULT ''",
+            [],
+        );
 
         Ok(())
     }
@@ -1880,7 +1933,18 @@ fn collect_rust_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(collect_repo_files(root)?
         .into_iter()
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .filter(|path| {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            should_index_rust_file(&normalized)
+        })
         .collect())
+}
+
+fn should_index_rust_file(file_path: &str) -> bool {
+    let normalized = file_path.replace('\\', "/");
+
+    // Temporarily exclude git-history/diff support code from the semantic graph.
+    !normalized.ends_with("src/history/mod.rs") && !normalized.contains("/src/history/")
 }
 
 fn collect_repo_files(root: &Path) -> io::Result<Vec<PathBuf>> {
@@ -2234,8 +2298,13 @@ fn upsert_historical_function_nodes(
     current_function_ids: &HashSet<String>,
 ) -> rusqlite::Result<()> {
     for function in functions {
+        if !should_index_rust_file(&function.file_path) {
+            continue;
+        }
+
         let is_active = current_function_ids.contains(&function.id);
         let node = RustSymbolNode {
+            summary: String::new(),
             id: function.id.clone(),
             node_type: "Function".to_string(),
             name: function.name.clone(),
