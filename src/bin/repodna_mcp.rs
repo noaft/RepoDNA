@@ -65,10 +65,14 @@ impl RepoDnaMcp {
 #[tokio::main]
 async fn main() -> Result<()> {
     let repo_path = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
-    let repo = Repository::discover(&repo_path)
-        .with_context(|| format!("failed to discover repository from '{}'", repo_path))?;
-    repodna_paths::validate_storage_configuration(&repo)?;
-    let db_path = repodna_paths::resolve_graph_db_path(&repo);
+    let db_path = if let Some(path) = settings::Settings::from_env().db_path {
+        path
+    } else {
+        let repo = Repository::discover(&repo_path)
+            .with_context(|| format!("failed to discover repository from '{}'", repo_path))?;
+        repodna_paths::validate_storage_configuration(&repo)?;
+        repodna_paths::resolve_graph_db_path(&repo)
+    };
 
     if !db_path.exists() {
         bail!(
