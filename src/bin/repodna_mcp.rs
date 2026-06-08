@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use git2::Repository;
 #[path = "../repodna_paths.rs"]
 mod repodna_paths;
+#[path = "../settings.rs"]
+mod settings;
 use rmcp::{
     Json, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},

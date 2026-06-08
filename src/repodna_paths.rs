@@ -1,55 +1,48 @@
+use crate::settings::Settings;
 use git2::Repository;
 use std::{
-    env, fs,
+    fs,
     io::{self, Error, ErrorKind},
     path::{Path, PathBuf},
 };
 
-const APP_DIR_NAME: &str = "RepoDNA";
 const DB_FILE_NAME: &str = "graph.db";
 const STATE_FILE_NAME: &str = "state.json";
 
 pub fn resolve_graph_db_path(repo: &Repository) -> PathBuf {
-    if let Some(path) = explicit_db_path() {
+    let settings = Settings::from_env();
+    if let Some(path) = settings.db_path.clone() {
         return path;
     }
 
-    resolve_repo_storage_dir(repo).join(DB_FILE_NAME)
+    resolve_repo_storage_dir(repo, &settings).join(DB_FILE_NAME)
 }
 
 pub fn resolve_state_path(repo: &Repository) -> PathBuf {
-    if let Some(path) = explicit_db_path() {
+    let settings = Settings::from_env();
+    if let Some(path) = settings.db_path.clone() {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         return parent.join(STATE_FILE_NAME);
     }
 
-    resolve_repo_storage_dir(repo).join(STATE_FILE_NAME)
+    resolve_repo_storage_dir(repo, &settings).join(STATE_FILE_NAME)
 }
 
 pub fn ensure_storage_dir(repo: &Repository) -> io::Result<PathBuf> {
-    let dir = if let Some(path) = explicit_db_path() {
+    let settings = Settings::from_env();
+    let dir = if let Some(path) = settings.db_path {
         path.parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."))
     } else {
-        resolve_repo_storage_dir(repo)
+        resolve_repo_storage_dir(repo, &settings)
     };
 
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
-fn explicit_db_path() -> Option<PathBuf> {
-    let raw = env::var_os("REPODNA_DB_PATH")?;
-    let path = PathBuf::from(raw);
-    if path.as_os_str().is_empty() {
-        None
-    } else {
-        Some(path)
-    }
-}
-
-fn resolve_repo_storage_dir(repo: &Repository) -> PathBuf {
+fn resolve_repo_storage_dir(repo: &Repository, settings: &Settings) -> PathBuf {
     let repo_root = resolve_repo_root(repo);
     let repo_name = repo_root
         .file_name()
@@ -59,26 +52,11 @@ fn resolve_repo_storage_dir(repo: &Repository) -> PathBuf {
         .unwrap_or_else(|| "repo".to_string());
     let repo_hash = fnv1a_64(repo_root.to_string_lossy().as_bytes());
 
-    resolve_storage_base_dir().join(format!("{}-{:016x}", repo_name, repo_hash))
+    resolve_storage_base_dir(settings).join(format!("{}-{:016x}", repo_name, repo_hash))
 }
 
-fn resolve_storage_base_dir() -> PathBuf {
-    if let Some(home) = env::var_os("REPODNA_HOME") {
-        let path = PathBuf::from(home);
-        if !path.as_os_str().is_empty() {
-            return path;
-        }
-    }
-
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data).join(APP_DIR_NAME);
-    }
-
-    if let Some(home) = env::var_os("HOME") {
-        return PathBuf::from(home).join(format!(".{}", APP_DIR_NAME.to_ascii_lowercase()));
-    }
-
-    PathBuf::from(".repodna")
+fn resolve_storage_base_dir(settings: &Settings) -> PathBuf {
+    settings.storage_home.clone()
 }
 
 fn resolve_repo_root(repo: &Repository) -> PathBuf {

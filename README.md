@@ -116,6 +116,18 @@ RepoDNA automatically reconstructs Architecture Decision Records from your commi
 
 > **Note:** RepoDNA is in early development. Star and watch the repo to follow progress.
 
+## Environment
+
+RepoDNA reads optional environment settings from `src/settings.rs` and a sample file is included at `.env.example`.
+
+- `REPODNA_DB_PATH`: store the SQLite database at one fixed file path.
+- `REPODNA_HOME`: override the default RepoDNA storage root.
+
+Default storage locations:
+
+- Windows: `%LOCALAPPDATA%\RepoDNA`
+- Unix-like systems: `~/.repodna`
+
 ```bash
 # Clone the repository
 git clone https://github.com/your-username/RepoDNA.git

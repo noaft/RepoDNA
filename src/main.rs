@@ -4,6 +4,7 @@ mod api;
 mod history;
 mod ingestion;
 mod repodna_paths;
+mod settings;
 
 /// Entry point for RepoDNA CLI.
 ///
