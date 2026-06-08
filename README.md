@@ -1,187 +1,218 @@
-<div align="center">
+# RepoDNA :brain: :dna:
 
-# 🧬 RepoDNA
+> **Persistent memory for coding tools**
+>
+> Stop losing repository context every time the session resets.
 
-### *The Code Tells You **What**. The History Tells You **Why**.*
+RepoDNA gives coding tools a long-term memory.
 
-**RepoDNA** transforms your repository's commit history, pull requests, and code evolution into deep contextual knowledge — so developers and AI agents finally understand not just *what* the code does, but *why* every line exists.
+Most code tools are brilliant inside the current window and forgetful the moment the session ends. They can read files, patch code, and answer local questions, but they repeatedly lose the deeper context:
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
-[![Made with Love](https://img.shields.io/badge/Made%20with-Love-red.svg)](https://github.com)
+- Why does this function exist?
+- Which bug or incident forced this design?
+- What files usually change together?
+- Which author or subsystem owns this area?
+- What did the last agent already discover before the session died?
 
-</div>
+RepoDNA turns repository history and code structure into a persistent knowledge graph so developers and coding agents can recover context instead of recomputing it from scratch every time.
 
----
+## The Story :repeat:
 
-## The Problem
+### The Context Tax
 
-When you open a codebase, your tools are great at telling you **what** the code does:
+Every coding session starts the same way:
 
-```python
-if retries > MAX_RETRIES:
-    raise CircuitBreakerException()
+1. The tool reads the current files.
+2. It forms a temporary mental model.
+3. It makes progress.
+4. The session ends.
+5. That mental model disappears.
+
+Then the next session pays the tax again:
+
+- reopen the same files
+- rerun the same searches
+- rederive the same architecture
+- rediscover the same historical constraints
+- reask the same "why is this here?" questions
+
+RepoDNA exists to break that loop.
+
+Instead of letting insight evaporate with the session, RepoDNA stores durable context in a graph:
+
+- code entities such as files, directories, and functions
+- historical evidence such as commits and authors
+- relationships such as contains, modifies, calls, and co-change patterns
+- metadata such as hotspots, ownership, and active symbols
+
+The result is a memory layer that tools can query quickly through local APIs and MCP.
+
+## What RepoDNA Is :card_index_dividers:
+
+### Not Another Assistant. The Memory Underneath.
+
+RepoDNA is a repository knowledge engine that builds and serves a persistent graph for humans and AI coding tools.
+
+Think of it as:
+
+- a memory cache for code understanding
+- a local knowledge graph for repository context
+- a bridge between raw git history and agent-friendly retrieval
+
+RepoDNA is not trying to replace your coding assistant.
+
+RepoDNA is the memory system underneath the assistant.
+
+## Why It Matters :zap:
+
+### Better Continuity, Less Rediscovery
+
+Without persistent memory, coding tools are forced to infer everything from the current snapshot. That makes them:
+
+- repetitive
+- fragile across session boundaries
+- weak at preserving architectural intent
+- expensive in tokens and time
+- prone to suggesting changes that ignore historical constraints
+
+With RepoDNA, a tool can ask better questions:
+
+- Show me active functions matching `build_graph`.
+- Which files are hotspots in this subsystem?
+- Which commits introduced this behavior?
+- What other files usually change with this one?
+- Which author has the strongest ownership signal here?
+
+That means less rediscovery and more continuity.
+
+## Core Idea :spider_web:
+
+### Turn Repo Activity Into Durable Context
+
+RepoDNA builds a knowledge graph from two inputs:
+
+1. Repository history
+2. Repository structure
+
+From there it exposes durable context to tools.
+
+```text
+Repository
+   ->
+RepoDNA ingestion
+   ->
+Knowledge graph
+   ->
+MCP / local API / future integrations
+   ->
+Developers and coding agents
 ```
 
-But none of them can tell you **why** this threshold is `MAX_RETRIES = 3` and not `5`. None of them know that this was added after a production outage at 2AM on a Friday. None of them remember that the original author debated this for two weeks in a PR review before settling on this value.
+## Current Capabilities :hammer_and_wrench:
 
-**That context — that *why* — is the most valuable knowledge in your codebase. And it's being lost every single day.**
+### Foundation First
 
----
+Today RepoDNA focuses on the foundation layer:
 
-## What is RepoDNA?
+- ingest git history into a local SQLite-backed graph
+- extract repository nodes such as commits, authors, files, directories, and functions
+- compute relationships like modifies, contains, calls, and co-change
+- calculate ownership and hotspot metadata
+- expose graph-backed search through an MCP server
 
-RepoDNA is a developer intelligence platform that **excavates the institutional knowledge buried in your git history** and makes it accessible, searchable, and understandable — for both humans and AI coding assistants.
+This is the groundwork for persistent repository memory.
 
-Think of it as giving your codebase a long-term memory.
+## Environment :gear:
 
-> Every commit is a decision. Every PR is a debate. Every revert is a lesson learned.
-> RepoDNA makes sure none of that wisdom disappears.
+### Shared Storage For Shared Memory
 
----
+RepoDNA reads optional environment settings from [src/settings.rs](/abs/path/d:/Git/RepoDNA/src/settings.rs:1). A sample file is included at [.env.example](/abs/path/d:/Git/RepoDNA/.env.example:1).
 
-## Core Features
-
-### 🔍 Contextual Code Archaeology
-Hover over any line of code and instantly see the full story behind it — the commit that introduced it, the bug it fixed, the PR discussion that shaped it, and the alternatives that were considered and rejected.
-
-### 🧠 AI-Powered Intent Extraction
-RepoDNA uses large language models to parse commit messages, PR descriptions, and code comments to extract **developer intent** — turning raw history into structured, queryable knowledge.
-
-### 📜 Decision Timeline
-Visualize the evolutionary history of any file, function, or module as a timeline. See how it changed, who changed it, why, and what triggered each major refactor.
-
-### 🔗 Causal Chain Analysis
-Understand cause-and-effect relationships across your codebase. When a piece of code was added to fix a bug — RepoDNA links it back to the issue, the failing test, and the incident report.
-
-### 🤖 AI Agent Context Injection
-Integrate RepoDNA with your AI coding assistants (GitHub Copilot, Cursor, Claude, etc.) to automatically inject historical context into every suggestion — so your AI agent understands the *why*, not just the *what*.
-
-### 📊 Knowledge Decay Detection
-Identify "orphaned knowledge" — code whose original authors have left, whose linked issues are closed, and whose context has never been documented. Before it becomes legacy debt.
-
-### 🗺️ Architecture Decision Records (ADR) Auto-Generation
-RepoDNA automatically reconstructs Architecture Decision Records from your commit history — even if you never wrote a single ADR.
-
----
-
-## How It Works
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Your Repository                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐   ┌──────────────┐    │
-│  │  Commits │  │    PRs   │  │  Issues  │   │   Comments   │    │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘   └──────┬───────┘    │
-└───────┼─────────────┼─────────────┼────────────────┼────────────┘
-        │             │             │                │
-        └─────────────┴─────────────┴────────────────┘
-                              │
-                    ┌─────────▼─────────┐
-                    │   RepoDNA Engine  │
-                    │                   │
-                    │  • Intent Mining  │
-                    │  • Causal Linking │
-                    │  • Context Graph  │
-                    └─────────┬─────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
-          │                   │                   │
-   ┌──────▼──────┐   ┌────────▼───────┐  ┌───────▼────────┐
-   │  Dev Tools  │   │  AI Assistants │  │  Web Dashboard │
-   │  (IDE ext.) │   │  (MCP / API)   │  │  (Analytics)   │
-   └─────────────┘   └────────────────┘  └────────────────┘
-```
-
-1. **Ingest** — RepoDNA connects to your repository and ingests the full commit history, PR discussions, issue threads, and inline comments.
-2. **Analyze** — The engine builds a semantic graph linking code changes to their motivations, authors, related issues, and temporal context.
-3. **Surface** — Context is surfaced through IDE extensions, a web dashboard, and an API/MCP server that AI agents can query in real time.
-
----
-
-## Use Cases
-
-| Scenario | Without RepoDNA | With RepoDNA |
-|---|---|---|
-| **Onboarding a new developer** | Weeks of shadowing and tribal knowledge transfer | Hours of self-guided exploration with full context |
-| **Debugging a mysterious bug** | "Who wrote this? Why is it like this?" | Instant causal chain from symptom to original decision |
-| **AI code review** | AI suggests changes that violate past decisions | AI understands past decisions and respects constraints |
-| **Code archaeology** | `git blame` + `git log` + grep + luck | Structured, semantic, queryable history |
-| **Architecture review** | Reconstruct decisions from memory | Auto-generated ADRs with full evidence |
-| **Refactoring safely** | Hope you don't break something invisible | Know exactly *why* the code is shaped the way it is |
-
----
-
-## Getting Started
-
-> **Note:** RepoDNA is in early development. Star and watch the repo to follow progress.
-
-## Environment
-
-RepoDNA reads optional environment settings from `src/settings.rs` and a sample file is included at `.env.example`.
-
-- `REPODNA_DB_PATH`: store the SQLite database at one fixed file path.
-- `REPODNA_HOME`: override the default RepoDNA storage root.
+- `REPODNA_DB_PATH`: store the SQLite database at one fixed file path
+- `REPODNA_HOME`: override the default RepoDNA storage root
 
 Default storage locations:
 
 - Windows: `%LOCALAPPDATA%\RepoDNA`
 - Unix-like systems: `~/.repodna`
 
-```bash
-# Clone the repository
-git clone https://github.com/your-username/RepoDNA.git
-cd RepoDNA
+## Getting Started :rocket:
 
-# Install dependencies
-npm install   # or pip install -r requirements.txt
+### From Repo To Retrieval
 
-# Point RepoDNA at your repository
-repodna analyze --repo /path/to/your/repo
+Build the knowledge graph for a repository:
 
-# Start the dashboard
-repodna serve
+```powershell
+cargo run -- build D:\Git\RepoDNA
 ```
 
----
+Use a fixed database path if you want tools to share one durable store:
 
-## Vision & Roadmap
+```powershell
+$env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\graph.db'
+cargo run -- build D:\Git\RepoDNA
+```
 
----
+Start the MCP server:
 
-## Why "RepoDNA"?
+```powershell
+$env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\graph.db'
+cargo run --bin repodna_mcp -- D:\Git\RepoDNA
+```
 
-DNA is the blueprint of life. It doesn't just store what an organism is — it encodes *why* it evolved that way, the millions of years of decisions, pressures, and adaptations that shaped it.
+Register it with Codex:
 
-Your repository is the same. Every commit is a mutation. Every PR is natural selection. Every revert is an extinction event.
+```powershell
+codex mcp add repo_dna --env REPODNA_DB_PATH=D:\RepoDNA\.repodna\graph.db -- cargo run --bin repodna_mcp -- D:\Git\RepoDNA
+```
 
-**RepoDNA reads that blueprint — and makes the evolution legible.**
+## What Success Looks Like :dart:
 
----
+### The Return-To-Context Test
 
-## Contributing
+The long-term goal is simple:
 
-Contributions are what make the open source community such an amazing place. Any contributions you make are **greatly appreciated**.
+When a developer or agent returns to a codebase after minutes, days, or weeks away, they should not have to start from zero.
 
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+They should be able to recover:
 
----
+- what exists
+- why it exists
+- what changed
+- who changed it
+- what is risky
+- what the last useful line of investigation already discovered
 
-## License
+RepoDNA helps turn code understanding from a per-session activity into a persistent asset.
+
+## Vision :telescope:
+
+### Why This Matters Long Term
+
+The broader product direction lives in [docs/VISION.md](/abs/path/d:/Git/RepoDNA/docs/VISION.md:1).
+
+Short version:
+
+- coding tools need memory, not just reasoning
+- repositories need durable context, not just source snapshots
+- knowledge graphs are a practical substrate for preserving that context
+
+## Contributing :handshake:
+
+### Build The Memory Layer
+
+Contributions are welcome. If you want to help, start by improving one of these layers:
+
+- ingestion quality
+- graph schema
+- retrieval quality
+- MCP ergonomics
+- developer workflows around persistent repository memory
+
+## License :page_facing_up:
 
 Distributed under the MIT License. See `LICENSE` for more information.
 
----
+Built for teams who are tired of paying the context tax every session.
 
-<div align="center">
-
-**Built for developers who believe code is not just written — it's *accumulated*.**
-
-*Stop reading code. Start understanding it.*
-
-</div>
-
+> **RepoDNA helps code tools remember what the repo already knows.**
