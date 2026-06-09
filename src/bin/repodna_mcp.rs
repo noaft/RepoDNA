@@ -22,6 +22,12 @@ struct SearchFunctionsParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SearchFunctionContextsParams {
+    query: String,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AddFunctionContextParams {
     function_id: String,
     summary: String,
@@ -42,6 +48,11 @@ struct SearchFunctionsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+struct SearchFunctionContextsResponse {
+    results: Vec<FunctionNodeResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 struct AddFunctionContextResponse {
     function_id: String,
     summary: String,
@@ -58,7 +69,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory. Use a memory-first workflow: before reading files broadly to understand repository code, call search_functions with the function name, symbol, behavior, or file context. If a matching function is found with a useful summary, use that saved context first. If the function exists but its summary is empty or too generic, inspect the source code yourself, then call add_function_context with the exact function_id and a concise high-level summary so future sessions do not rediscover it. If search_functions returns no relevant result, fall back to normal code search and reading.".to_string(),
+                "RepoDNA is persistent repository memory. Use a memory-first workflow: before reading files broadly to understand repository code, call search_function_contexts when you have a behavioral or semantic question, and call search_functions when you have a function name, symbol, id, or file hint. If a matching function is found with a useful summary, use that saved context first. If the function exists but its summary is empty or too generic, inspect the source code yourself, then call add_function_context with the exact function_id and a concise high-level summary so future sessions do not rediscover it. If RepoDNA returns no relevant result, fall back to normal code search and reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -83,6 +94,20 @@ impl RepoDnaMcp {
     ) -> Result<Json<SearchFunctionsResponse>, String> {
         search_function_nodes(&self.db_path, &query, limit.unwrap_or(20))
             .map(|results| Json(SearchFunctionsResponse { results }))
+            .map_err(|err| err.to_string())
+    }
+
+    #[tool(
+        description = "Search saved function context by summary. Use this when you want semantic-style retrieval over what functions are for, rather than locating a function by exact name, id, or file. This searches only active functions with non-empty summaries, ranks matches by summary phrase and term overlap, and returns node-shaped JSON results. If this returns no useful result, use search_functions and then read source/add_function_context as needed."
+    )]
+    async fn search_function_contexts(
+        &self,
+        Parameters(SearchFunctionContextsParams { query, limit }): Parameters<
+            SearchFunctionContextsParams,
+        >,
+    ) -> Result<Json<SearchFunctionContextsResponse>, String> {
+        search_function_contexts(&self.db_path, &query, limit.unwrap_or(20))
+            .map(|results| Json(SearchFunctionContextsResponse { results }))
             .map_err(|err| err.to_string())
     }
 
@@ -166,6 +191,80 @@ fn search_function_nodes(
     }
 
     Ok(items)
+}
+
+fn search_function_contexts(
+    db_path: &Path,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FunctionNodeResult>> {
+    let conn = open_existing_graph_db(db_path)?;
+    let terms = query_terms(query);
+    let safe_limit = limit.clamp(1, 100);
+
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT
+            COALESCE(summary, ''),
+            id,
+            type,
+            name,
+            metadata
+         FROM nodes
+         WHERE type = 'Function'
+           AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
+           AND TRIM(COALESCE(summary, '')) <> ''",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(FunctionNodeResult {
+            summary: row.get(0)?,
+            id: row.get(1)?,
+            r#type: row.get(2)?,
+            name: row.get(3)?,
+            metadata: row.get(4)?,
+        })
+    })?;
+
+    let phrase = query.trim().to_ascii_lowercase();
+    let mut scored = Vec::new();
+    for row in rows {
+        let item = row?;
+        let summary = item.summary.to_ascii_lowercase();
+        let matched_terms = terms.iter().filter(|term| summary.contains(*term)).count();
+        if matched_terms == 0 {
+            continue;
+        }
+
+        let phrase_bonus = usize::from(!phrase.is_empty() && summary.contains(&phrase));
+        let score = matched_terms + phrase_bonus * terms.len();
+        scored.push((score, item.name.clone(), item.id.clone(), item));
+    }
+
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    Ok(scored
+        .into_iter()
+        .take(safe_limit)
+        .map(|(_, _, _, item)| item)
+        .collect())
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|term| term.len() > 1)
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 fn add_function_context(
@@ -295,6 +394,27 @@ mod tests {
         )?;
 
         let results = search_function_nodes(db.path(), "durable repository graph", 20)?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "function:src/main.rs:build_graph");
+        assert_eq!(
+            results[0].summary,
+            "Builds the durable repository graph used by local tools."
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_function_contexts_matches_summary_terms_and_skips_empty_summaries() -> Result<()> {
+        let db = test_db()?;
+        add_function_context(
+            db.path(),
+            "function:src/main.rs:build_graph",
+            "Builds the durable repository graph used by local tools.",
+        )?;
+
+        let results = search_function_contexts(db.path(), "durable local tools", 20)?;
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, "function:src/main.rs:build_graph");

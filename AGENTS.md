@@ -107,11 +107,12 @@ The MCP server must be easy to launch and resilient in local environments.
 
 When an agent needs to understand repository code, prefer RepoDNA memory before broad filesystem search:
 
-1. Call `search_functions` with the function name, symbol, behavior, or file context.
-2. If a relevant result has a useful non-empty `summary`, use that saved context first.
-3. If a relevant function exists but `summary` is empty, stale, or too generic, inspect the source code yourself.
-4. After understanding the function, call `add_function_context` with the exact `function_id` and a concise high-level summary of what the function is for.
-5. If RepoDNA has no relevant result, fall back to normal code search and reading.
+1. Call `search_function_contexts` for behavioral or semantic questions based on what a function is for.
+2. Call `search_functions` when you have a function name, symbol, id, or file hint.
+3. If a relevant result has a useful non-empty `summary`, use that saved context first.
+4. If a relevant function exists but `summary` is empty, stale, or too generic, inspect the source code yourself.
+5. After understanding the function, call `add_function_context` with the exact `function_id` and a concise high-level summary of what the function is for.
+6. If RepoDNA has no relevant result, fall back to normal code search and reading.
 
 This loop is core product behavior: every fresh investigation should improve durable repository memory for the next session.
 
