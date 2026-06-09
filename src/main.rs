@@ -1,6 +1,7 @@
 use std::env;
 
 mod api;
+mod embeddings;
 mod history;
 mod ingestion;
 mod repodna_paths;
@@ -92,6 +93,29 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
+
+    if matches!(args.get(1).map(String::as_str), Some("embed-text")) {
+        let text = args
+            .get(2..)
+            .map(|parts| parts.join(" "))
+            .unwrap_or_default();
+
+        match embeddings::embed_text_with_nomic(&text) {
+            Ok(embedding) => {
+                println!(
+                    "Embedding generated with {} dimensions.",
+                    embeddings::NOMIC_EMBEDDING_DIMENSIONS
+                );
+                println!("Vector length: {}", embedding.len());
+            }
+            Err(err) => {
+                eprintln!("Embedding failed: {err}");
+                std::process::exit(1);
+            }
+        }
+
         return;
     }
 
