@@ -51,7 +51,9 @@ impl RepoDnaMcp {
         }
     }
 
-    #[tool(description = "Search active function nodes in project and return node-shaped JSON results")]
+    #[tool(
+        description = "Search RepoDNA's persistent graph for active repository functions. Use this first when you need to understand, locate, inspect, or reason about a function, symbol, behavior, implementation detail, or file-level function context before falling back to broad filesystem search. Returns node-shaped JSON results with function names, ids, summaries, and metadata."
+    )]
     async fn search_functions(
         &self,
         Parameters(SearchFunctionsParams { query, limit }): Parameters<SearchFunctionsParams>,
