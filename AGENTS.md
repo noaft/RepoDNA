@@ -103,6 +103,18 @@ The MCP server must be easy to launch and resilient in local environments.
 - Remember that MCP failures often look like handshake failures even when the real problem is early process exit.
 - Keep MCP tool outputs schema-safe. Root output schemas must be objects, not arrays.
 
+## RepoDNA Memory-First Workflow
+
+When an agent needs to understand repository code, prefer RepoDNA memory before broad filesystem search:
+
+1. Call `search_functions` with the function name, symbol, behavior, or file context.
+2. If a relevant result has a useful non-empty `summary`, use that saved context first.
+3. If a relevant function exists but `summary` is empty, stale, or too generic, inspect the source code yourself.
+4. After understanding the function, call `add_function_context` with the exact `function_id` and a concise high-level summary of what the function is for.
+5. If RepoDNA has no relevant result, fall back to normal code search and reading.
+
+This loop is core product behavior: every fresh investigation should improve durable repository memory for the next session.
+
 If you change MCP behavior:
 
 1. Keep startup quiet on `stdio`.
