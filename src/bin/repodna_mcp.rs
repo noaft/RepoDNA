@@ -437,7 +437,7 @@ fn decode_embedding_blob(blob: &[u8]) -> Vec<f32> {
 fn open_existing_graph_db(db_path: &Path) -> Result<Connection> {
     if !db_path.exists() {
         bail!(
-            "graph database not found at {}. Run `cargo run -- build <repo>` first, or set REPODNA_DB_PATH to an existing graph.db.",
+            "graph database not found at {}. Run `cargo run -- build <repo>` first with the same repo path. Prefer REPODNA_HOME for automatic per-repository storage, or set REPODNA_DB_PATH to an existing per-repo graph.db.",
             db_path.display()
         );
     }

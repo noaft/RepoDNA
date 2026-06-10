@@ -14,7 +14,7 @@ Most code tools are brilliant inside the current window and forgetful the moment
 - Which author or subsystem owns this area?
 - What did the last agent already discover before the session died?
 
-RepoDNA turns repository history and code structure into a persistent knowledge graph so developers and coding agents can recover context instead of recomputing it from scratch every time.
+RepoDNA turns the current repository structure and saved tool knowledge into a persistent graph so developers and coding agents can recover context instead of recomputing it from scratch every time.
 
 ## The Story :repeat:
 
@@ -41,9 +41,8 @@ RepoDNA exists to break that loop.
 Instead of letting insight evaporate with the session, RepoDNA stores durable context in a graph:
 
 - code entities such as files, directories, and functions
-- historical evidence such as commits and authors
-- relationships such as contains, modifies, calls, and co-change patterns
-- metadata such as hotspots, ownership, and active symbols
+- relationships such as contains, calls, main-tree, and main-flow structure
+- metadata such as hotspots and saved function summaries
 
 The result is a memory layer that tools can query quickly through local APIs and MCP.
 
@@ -57,7 +56,7 @@ Think of it as:
 
 - a memory cache for code understanding
 - a local knowledge graph for repository context
-- a bridge between raw git history and agent-friendly retrieval
+- a bridge between the current codebase and agent-friendly retrieval
 
 RepoDNA is not trying to replace your coding assistant.
 
@@ -114,9 +113,9 @@ Developers and coding agents
 
 Today RepoDNA focuses on the foundation layer:
 
-- ingest git history into a local SQLite-backed graph
-- extract repository nodes such as commits, authors, files, directories, and functions
-- compute relationships like modifies, contains, calls, and co-change
+- ingest the current repository code into a local SQLite-backed graph
+- extract repository nodes such as files, directories, and functions
+- compute relationships like contains, calls, and main-tree flow
 - calculate ownership and hotspot metadata
 - expose graph-backed search through an MCP server
 
@@ -128,8 +127,8 @@ This is the groundwork for persistent repository memory.
 
 RepoDNA reads optional environment settings from [src/settings.rs](/abs/path/d:/Git/RepoDNA/src/settings.rs:1). A sample file is included at [.env.example](/abs/path/d:/Git/RepoDNA/.env.example:1).
 
-- `REPODNA_DB_PATH`: store the SQLite database at one fixed file path
-- `REPODNA_HOME`: override the default RepoDNA storage root
+- `REPODNA_HOME`: override the default RepoDNA storage root. RepoDNA creates one graph directory per repository under this root.
+- `REPODNA_DB_PATH`: pin RepoDNA to one fixed SQLite file. Use this only when you intentionally want to manage the database path yourself.
 
 Default storage locations:
 
@@ -143,27 +142,40 @@ Default storage locations:
 Build the knowledge graph for a repository:
 
 ```powershell
+$env:REPODNA_HOME='D:\RepoDNA\.repodna'
 cargo run -- build D:\Git\RepoDNA
 ```
 
-Use a fixed database path if you want tools to share one durable store:
+Start the graph API for the same repository:
 
 ```powershell
-$env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\graph.db'
-cargo run -- build D:\Git\RepoDNA
+$env:REPODNA_HOME='D:\RepoDNA\.repodna'
+cargo run -- serve-graph D:\Git\RepoDNA 127.0.0.1:3000
 ```
 
 Start the MCP server:
 
 ```powershell
-$env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\graph.db'
+$env:REPODNA_HOME='D:\RepoDNA\.repodna'
 cargo run --bin repodna_mcp -- D:\Git\RepoDNA
 ```
 
 Register it with Codex:
 
 ```powershell
-codex mcp add repo_dna --env REPODNA_DB_PATH=D:\RepoDNA\.repodna\graph.db -- cargo run --bin repodna_mcp -- D:\Git\RepoDNA
+codex mcp add repo_dna --env REPODNA_HOME=D:\RepoDNA\.repodna -- cargo run --bin repodna_mcp -- D:\Git\RepoDNA
+```
+
+Repo-specific storage is automatic when `REPODNA_DB_PATH` is unset. For example,
+`D:\Git\RepoA` and `D:\Git\RepoB` get separate graph databases under
+`REPODNA_HOME`, so search results stay scoped to the repository passed to
+`build`, `serve-graph`, or `repodna_mcp`.
+
+Use `REPODNA_DB_PATH` only for an explicit per-repo database path, such as:
+
+```powershell
+$env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\repo-a\graph.db'
+cargo run -- build D:\Git\RepoA
 ```
 
 ## What Success Looks Like :dart:
