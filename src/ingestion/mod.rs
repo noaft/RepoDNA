@@ -1,5 +1,5 @@
 use crate::repodna_paths;
-use git2::{Repository, Sort};
+use git2::Repository;
 use regex::Regex;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -11,22 +11,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Node model for graph storage.
-pub struct CommitNode {
-    pub summary: String,
-    pub id: String,
-    pub node_type: String,
-    pub name: String,
-    pub metadata: String,
-}
-
-pub struct AuthorNode {
-    pub summary: String,
-    pub id: String,
-    pub node_type: String,
-    pub name: String,
-    pub metadata: String,
-}
-
 pub struct FileNode {
     pub summary: String,
     pub id: String,
@@ -195,49 +179,6 @@ impl RustSymbolNode {
     }
 }
 
-impl CommitNode {
-    /// Build a commit node from a git commit object.
-    pub fn from_git_commit(commit: &git2::Commit<'_>, file_count: usize) -> Self {
-        let author = commit.author();
-        let metadata = json!({
-            "sha": commit.id().to_string(),
-            "author": author.name().unwrap_or("<unknown>"),
-            "email": author.email().unwrap_or("<unknown>"),
-            "timestamp": commit.time().seconds(),
-            "file_count": file_count
-        })
-        .to_string();
-
-        Self {
-            summary: String::new(),
-            id: format!("commit_{}", commit.id()),
-            node_type: "Commit".to_string(),
-            name: commit.summary().unwrap_or("<no message>").to_string(),
-            metadata,
-        }
-    }
-}
-
-impl AuthorNode {
-    pub fn from_git_commit(commit: &git2::Commit<'_>) -> Self {
-        let author = commit.author();
-        let author_name = author.name().unwrap_or("<unknown>");
-        let author_email = author.email().unwrap_or("unknown@example.com");
-
-        Self {
-            summary: String::new(),
-            id: format!("author_{}", sanitize_id(author_email)),
-            node_type: "Author".to_string(),
-            name: author_name.to_string(),
-            metadata: json!({
-                "name": author_name,
-                "email": author_email
-            })
-            .to_string(),
-        }
-    }
-}
-
 impl FileNode {
     pub fn from_path(path: &str) -> Self {
         Self {
@@ -280,27 +221,6 @@ impl CommitRepository {
         let repository = Self { conn };
         repository.ensure_schema()?;
         Ok(repository)
-    }
-
-    /// Insert node if missing. Existing nodes are kept unchanged.
-    pub fn upsert_node(&self, node: &CommitNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(
-            &node.id,
-            &node.node_type,
-            &node.name,
-            &node.summary,
-            &node.metadata,
-        )
-    }
-
-    pub fn upsert_author_node(&self, node: &AuthorNode) -> rusqlite::Result<bool> {
-        self.upsert_node_internal(
-            &node.id,
-            &node.node_type,
-            &node.name,
-            &node.summary,
-            &node.metadata,
-        )
     }
 
     pub fn upsert_file_node(&self, node: &FileNode) -> rusqlite::Result<bool> {
@@ -377,26 +297,6 @@ impl CommitRepository {
         Ok(rows_affected > 0)
     }
 
-    pub fn upsert_or_increment_co_change_edge(
-        &self,
-        source_file_id: &str,
-        target_file_id: &str,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO edges (source, target, relation, metadata)
-             VALUES (?1, ?2, 'CO_CHANGE', json_object('count', 1))
-             ON CONFLICT(source, target, relation)
-             DO UPDATE SET metadata = json_set(
-                 COALESCE(edges.metadata, '{}'),
-                 '$.count',
-                 COALESCE(json_extract(edges.metadata, '$.count'), 0) + 1
-             )",
-            params![source_file_id, target_file_id],
-        )?;
-
-        Ok(())
-    }
-
     pub fn remove_file_to_function_contains_edges(&self) -> rusqlite::Result<usize> {
         self.conn.execute(
             "DELETE FROM edges
@@ -410,6 +310,24 @@ impl CommitRepository {
     pub fn remove_edges_by_relation(&self, relation: &str) -> rusqlite::Result<usize> {
         self.conn
             .execute("DELETE FROM edges WHERE relation = ?1", params![relation])
+    }
+
+    pub fn remove_nodes_by_type(&self, node_type: &str) -> rusqlite::Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM nodes WHERE type = ?1 ORDER BY id")?;
+        let rows = stmt.query_map(params![node_type], |row| row.get::<_, String>(0))?;
+
+        let mut node_ids = Vec::new();
+        for row in rows {
+            node_ids.push(row?);
+        }
+
+        for node_id in node_ids {
+            self.delete_node_and_references(&node_id, node_type)?;
+        }
+
+        Ok(())
     }
 
     pub fn node_count_by_type(&self, node_type: &str) -> rusqlite::Result<usize> {
@@ -458,25 +376,6 @@ impl CommitRepository {
         )?;
 
         Ok(rows_affected > 0)
-    }
-
-    pub fn has_metadata(
-        &self,
-        entity_type: &str,
-        entity_id: &str,
-        key: &str,
-    ) -> rusqlite::Result<bool> {
-        self.conn
-            .query_row(
-                "SELECT 1
-                 FROM metadata
-                 WHERE entity_type = ?1 AND entity_id = ?2 AND key = ?3
-                 LIMIT 1",
-                params![entity_type, entity_id, key],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|row| row.is_some())
     }
 
     pub fn compute_and_store_file_ownership(&self) -> rusqlite::Result<usize> {
@@ -850,24 +749,6 @@ impl CommitRepository {
         Ok(owners)
     }
 
-    fn upsert_node_internal(
-        &self,
-        id: &str,
-        node_type: &str,
-        name: &str,
-        summary: &str,
-        metadata: &str,
-    ) -> rusqlite::Result<bool> {
-        let rows_affected = self.conn.execute(
-            "INSERT INTO nodes (id, type, name, summary, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(id) DO NOTHING",
-            params![id, node_type, name, summary, metadata],
-        )?;
-
-        Ok(rows_affected > 0)
-    }
-
     fn ensure_schema(&self) -> rusqlite::Result<()> {
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS nodes (
@@ -988,12 +869,11 @@ impl IngestionReport {
     }
 }
 
-/// Build the foundation graph from commits reachable from HEAD.
+/// Build the graph from the current working tree snapshot.
 ///
 /// Behavior:
-/// - Uses git2 revwalk from HEAD.
-/// - Creates `Commit`, `Author`, and `File` nodes.
-/// - Creates `AUTHORED_BY` and `MODIFIES` edges.
+/// - Scans files and Rust symbols from the current checkout.
+/// - Skips git history and diff-derived edges.
 /// - Skips duplicates via conflict-safe upserts.
 pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::error::Error>> {
     let repo = Repository::discover(repo_path)?;
@@ -1002,100 +882,35 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
     repodna_paths::ensure_storage_dir(&repo)?;
     let repository = CommitRepository::open(&db_path)?;
 
-    let mut revwalk = repo.revwalk()?;
-    revwalk.push_head()?;
-    revwalk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
-
+    repository.remove_nodes_by_type("Commit")?;
+    repository.remove_nodes_by_type("Author")?;
+    let _ = repository.remove_edges_by_relation("AUTHORED_BY")?;
+    let _ = repository.remove_edges_by_relation("MODIFIES")?;
+    let _ = repository.remove_edges_by_relation("MODIFIED")?;
+    let _ = repository.remove_edges_by_relation("CO_CHANGE")?;
     let _ = repository.remove_file_to_function_contains_edges()?;
     let _ = repository.remove_edges_by_relation("CALLS")?;
     let _ = repository.remove_edges_by_relation("MAIN_TREE")?;
     let _ = repository.remove_edges_by_relation("MAIN_FLOW")?;
 
-    let mut scanned = 0usize;
-    let mut commit_nodes_inserted = 0usize;
-    let mut author_nodes_inserted = 0usize;
+    let scanned = 0usize;
+    let commit_nodes_inserted = 0usize;
+    let author_nodes_inserted = 0usize;
     let mut file_nodes_inserted = 0usize;
     let mut directory_nodes_inserted = 0usize;
-    let mut authored_by_edges_inserted = 0usize;
-    let mut modifies_edges_inserted = 0usize;
+    let authored_by_edges_inserted = 0usize;
+    let modifies_edges_inserted = 0usize;
     let mut contains_edges_inserted = 0usize;
     let mut call_edges_inserted = 0usize;
     let mut main_tree_edges_inserted = 0usize;
     let mut main_flow_edges_inserted = 0usize;
-    let mut modified_function_edges_inserted = 0usize;
-    let mut co_change_pairs_processed = 0usize;
+    let modified_function_edges_inserted = 0usize;
+    let co_change_pairs_processed = 0usize;
     let mut function_nodes_inserted = 0usize;
     let mut class_nodes_inserted = 0usize;
     let mut struct_nodes_inserted = 0usize;
     let mut interface_nodes_inserted = 0usize;
     let mut global_variable_nodes_inserted = 0usize;
-
-    for oid_result in revwalk {
-        let oid = oid_result?;
-        let commit = repo.find_commit(oid)?;
-        let files = collect_modified_files(&repo, &commit)?;
-
-        let commit_node = CommitNode::from_git_commit(&commit, files.len());
-        let author_node = AuthorNode::from_git_commit(&commit);
-
-        scanned += 1;
-        if repository.upsert_node(&commit_node)? {
-            commit_nodes_inserted += 1;
-        }
-
-        if repository.upsert_author_node(&author_node)? {
-            author_nodes_inserted += 1;
-        }
-
-        let authored_by_edge = EdgeRecord {
-            source: commit_node.id.clone(),
-            target: author_node.id.clone(),
-            relation: "AUTHORED_BY".to_string(),
-            metadata: Some(json!({ "sha": commit.id().to_string() }).to_string()),
-        };
-
-        if repository.upsert_edge(&authored_by_edge)? {
-            authored_by_edges_inserted += 1;
-        }
-
-        let file_pairs = generate_file_pairs(&files);
-
-        for file_path in files {
-            let file_node = FileNode::from_path(&file_path);
-            if repository.upsert_file_node(&file_node)? {
-                file_nodes_inserted += 1;
-            }
-
-            let (directory_nodes, contains_edges) =
-                build_directory_hierarchy(&file_path, &file_node.id);
-            for directory_node in directory_nodes {
-                if repository.upsert_directory_node(&directory_node)? {
-                    directory_nodes_inserted += 1;
-                }
-            }
-            for contains_edge in contains_edges {
-                if repository.upsert_edge(&contains_edge)? {
-                    contains_edges_inserted += 1;
-                }
-            }
-
-            let modifies_edge = EdgeRecord {
-                source: commit_node.id.clone(),
-                target: file_node.id,
-                relation: "MODIFIES".to_string(),
-                metadata: Some(json!({ "path": file_path }).to_string()),
-            };
-
-            if repository.upsert_edge(&modifies_edge)? {
-                modifies_edges_inserted += 1;
-            }
-        }
-
-        for (left_file_id, right_file_id) in file_pairs {
-            repository.upsert_or_increment_co_change_edge(&left_file_id, &right_file_id)?;
-            co_change_pairs_processed += 1;
-        }
-    }
 
     if let Some(workdir) = repo.workdir() {
         let repo_files = collect_repo_files(workdir)?;
@@ -1207,8 +1022,6 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         main_tree_edges_inserted = compute_and_store_main_tree(&repository, &rust_snapshots)?;
         main_flow_edges_inserted = compute_and_store_main_flow_tree(&repository, &rust_snapshots)?;
 
-        modified_function_edges_inserted =
-            index_commit_function_relationships(&repo, &repository, &rust_snapshots)?;
         repository.prune_functions_not_in_ids(&active_function_ids)?;
     }
 
@@ -1287,32 +1100,6 @@ pub fn ingest_commits(repo_path: &str) -> Result<IngestionReport, Box<dyn std::e
     build_graph(repo_path)
 }
 
-fn collect_modified_files(
-    repo: &Repository,
-    commit: &git2::Commit<'_>,
-) -> Result<Vec<String>, git2::Error> {
-    let commit_tree = commit.tree()?;
-    let mut options = git2::DiffOptions::new();
-    let diff = if commit.parent_count() > 0 {
-        let parent = commit.parent(0)?;
-        let parent_tree = parent.tree()?;
-        repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), Some(&mut options))?
-    } else {
-        repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut options))?
-    };
-
-    let mut seen = HashSet::<String>::new();
-    for delta in diff.deltas() {
-        if let Some(path) = pick_delta_path(&delta) {
-            seen.insert(path);
-        }
-    }
-
-    let mut files: Vec<String> = seen.into_iter().collect();
-    files.sort();
-    Ok(files)
-}
-
 fn hotspot_half_life_days() -> f64 {
     30.0
 }
@@ -1322,32 +1109,6 @@ fn current_unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn generate_file_pairs(files: &[String]) -> Vec<(String, String)> {
-    let mut pairs = Vec::<(String, String)>::new();
-    for left in 0..files.len() {
-        for right in (left + 1)..files.len() {
-            let left_id = FileNode::from_path(&files[left]).id;
-            let right_id = FileNode::from_path(&files[right]).id;
-
-            if left_id <= right_id {
-                pairs.push((left_id, right_id));
-            } else {
-                pairs.push((right_id, left_id));
-            }
-        }
-    }
-
-    pairs
-}
-
-fn pick_delta_path(delta: &git2::DiffDelta<'_>) -> Option<String> {
-    delta
-        .new_file()
-        .path()
-        .or_else(|| delta.old_file().path())
-        .map(|path| path.to_string_lossy().replace('\\', "/"))
 }
 
 fn sanitize_id(input: &str) -> String {
@@ -2099,296 +1860,6 @@ fn extract_rust_function_spans(
     Ok(functions)
 }
 
-fn index_commit_function_relationships(
-    repo: &Repository,
-    repository: &CommitRepository,
-    rust_snapshots: &[RustFileSnapshot],
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let current_function_ids = rust_snapshots
-        .iter()
-        .flat_map(|snapshot| snapshot.function_spans.iter().map(|span| span.id.clone()))
-        .collect::<HashSet<_>>();
-
-    let mut revwalk = repo.revwalk()?;
-    revwalk.push_head()?;
-    revwalk.set_sorting(Sort::TIME | Sort::TOPOLOGICAL)?;
-
-    let mut inserted = 0usize;
-    for oid_result in revwalk {
-        let oid = oid_result?;
-        let commit = repo.find_commit(oid)?;
-        let commit_id = format!("commit_{}", commit.id());
-
-        if repository.has_metadata("Commit", &commit_id, "function_modifications_indexed")? {
-            continue;
-        }
-
-        inserted += index_commit_function_edges_for_commit(
-            repo,
-            repository,
-            &commit,
-            &current_function_ids,
-        )?;
-
-        let _ = repository.upsert_metadata(
-            "Commit",
-            &commit_id,
-            "function_modifications_indexed",
-            "{\"indexed\":true}",
-        )?;
-    }
-
-    Ok(inserted)
-}
-
-fn index_commit_function_edges_for_commit(
-    repo: &Repository,
-    repository: &CommitRepository,
-    commit: &git2::Commit<'_>,
-    current_function_ids: &HashSet<String>,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let commit_tree = commit.tree()?;
-    let parent_tree = if commit.parent_count() > 0 {
-        Some(commit.parent(0)?.tree()?)
-    } else {
-        None
-    };
-
-    let mut options = git2::DiffOptions::new();
-    let diff = if let Some(parent_tree_ref) = parent_tree.as_ref() {
-        repo.diff_tree_to_tree(
-            Some(parent_tree_ref),
-            Some(&commit_tree),
-            Some(&mut options),
-        )?
-    } else {
-        repo.diff_tree_to_tree(None, Some(&commit_tree), Some(&mut options))?
-    };
-
-    let commit_node_id = format!("commit_{}", commit.id());
-    let mut touched_function_ids = HashSet::<String>::new();
-
-    for delta_index in 0..diff.deltas().len() {
-        let Some(delta) = diff.get_delta(delta_index) else {
-            continue;
-        };
-
-        let old_path = delta
-            .old_file()
-            .path()
-            .map(|path| path.to_string_lossy().replace('\\', "/"));
-        let new_path = delta
-            .new_file()
-            .path()
-            .map(|path| path.to_string_lossy().replace('\\', "/"));
-
-        let relevant_path = new_path
-            .as_ref()
-            .or(old_path.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        if !relevant_path.ends_with(".rs") {
-            continue;
-        }
-
-        let old_content = match (parent_tree.as_ref(), old_path.as_deref()) {
-            (Some(tree), Some(path)) => read_file_content_from_tree(repo, tree, path)?,
-            _ => None,
-        };
-        let new_content = match new_path.as_deref() {
-            Some(path) => read_file_content_from_tree(repo, &commit_tree, path)?,
-            None => None,
-        };
-
-        let old_functions =
-            if let (Some(path), Some(content)) = (old_path.as_deref(), old_content.as_deref()) {
-                extract_rust_function_spans(path, content)?
-            } else {
-                Vec::new()
-            };
-        let new_functions =
-            if let (Some(path), Some(content)) = (new_path.as_deref(), new_content.as_deref()) {
-                extract_rust_function_spans(path, content)?
-            } else {
-                Vec::new()
-            };
-
-        upsert_historical_function_nodes(repository, &old_functions, current_function_ids)?;
-        upsert_historical_function_nodes(repository, &new_functions, current_function_ids)?;
-
-        let changed_ranges = extract_changed_line_ranges(&diff, delta_index)?;
-
-        if changed_ranges.full_file {
-            for function in old_functions.iter().chain(new_functions.iter()) {
-                if current_function_ids.contains(&function.id) {
-                    touched_function_ids.insert(function.id.clone());
-                }
-            }
-            continue;
-        }
-
-        for function in old_functions {
-            if current_function_ids.contains(&function.id)
-                && changed_ranges
-                    .old_ranges
-                    .iter()
-                    .any(|range| ranges_intersect(*range, (function.start_line, function.end_line)))
-            {
-                touched_function_ids.insert(function.id);
-            }
-        }
-
-        for function in new_functions {
-            if current_function_ids.contains(&function.id)
-                && changed_ranges
-                    .new_ranges
-                    .iter()
-                    .any(|range| ranges_intersect(*range, (function.start_line, function.end_line)))
-            {
-                touched_function_ids.insert(function.id);
-            }
-        }
-    }
-
-    let mut inserted = 0usize;
-    for function_id in touched_function_ids {
-        let edge = EdgeRecord {
-            source: commit_node_id.clone(),
-            target: function_id,
-            relation: "MODIFIED".to_string(),
-            metadata: None,
-        };
-
-        if repository.upsert_edge(&edge)? {
-            inserted += 1;
-        }
-    }
-
-    Ok(inserted)
-}
-
-fn upsert_historical_function_nodes(
-    repository: &CommitRepository,
-    functions: &[FunctionSpan],
-    current_function_ids: &HashSet<String>,
-) -> rusqlite::Result<()> {
-    for function in functions {
-        if !should_index_rust_file(&function.file_path) {
-            continue;
-        }
-        if !current_function_ids.contains(&function.id) {
-            continue;
-        }
-
-        let node = RustSymbolNode {
-            summary: String::new(),
-            id: function.id.clone(),
-            node_type: "Function".to_string(),
-            name: function.name.clone(),
-            metadata: json!({
-                "file": function.file_path,
-                "symbol_key": function_symbol_key(&function.file_path, &function.name, function.start_line),
-                "line": function.start_line,
-                "start_line": function.start_line,
-                "end_line": function.end_line,
-                "rust_symbol_kind": "function"
-            })
-            .to_string(),
-        };
-        let _ = repository.upsert_symbol_node(&node)?;
-    }
-
-    Ok(())
-}
-
-struct ChangedLineRanges {
-    old_ranges: Vec<(usize, usize)>,
-    new_ranges: Vec<(usize, usize)>,
-    full_file: bool,
-}
-
-fn extract_changed_line_ranges(
-    diff: &git2::Diff<'_>,
-    delta_index: usize,
-) -> Result<ChangedLineRanges, git2::Error> {
-    let Some(patch) = git2::Patch::from_diff(diff, delta_index)? else {
-        return Ok(ChangedLineRanges {
-            old_ranges: Vec::new(),
-            new_ranges: Vec::new(),
-            full_file: true,
-        });
-    };
-
-    let mut old_ranges = Vec::<(usize, usize)>::new();
-    let mut new_ranges = Vec::<(usize, usize)>::new();
-
-    for hunk_index in 0..patch.num_hunks() {
-        let (_, line_count) = patch.hunk(hunk_index)?;
-        let mut old_start = None::<usize>;
-        let mut old_end = None::<usize>;
-        let mut new_start = None::<usize>;
-        let mut new_end = None::<usize>;
-
-        for line_index in 0..line_count {
-            let line = patch.line_in_hunk(hunk_index, line_index)?;
-            match line.origin() {
-                '+' => {
-                    if let Some(line_no) = line.new_lineno() {
-                        let line_no = line_no as usize;
-                        new_start.get_or_insert(line_no);
-                        new_end = Some(line_no);
-                    }
-                }
-                '-' => {
-                    if let Some(line_no) = line.old_lineno() {
-                        let line_no = line_no as usize;
-                        old_start.get_or_insert(line_no);
-                        old_end = Some(line_no);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        if let (Some(start), Some(end)) = (old_start, old_end) {
-            old_ranges.push((start, end));
-        }
-        if let (Some(start), Some(end)) = (new_start, new_end) {
-            new_ranges.push((start, end));
-        }
-    }
-
-    Ok(ChangedLineRanges {
-        full_file: old_ranges.is_empty() && new_ranges.is_empty(),
-        old_ranges,
-        new_ranges,
-    })
-}
-
-fn ranges_intersect(left: (usize, usize), right: (usize, usize)) -> bool {
-    left.0 <= right.1 && right.0 <= left.1
-}
-
-fn read_file_content_from_tree(
-    repo: &Repository,
-    tree: &git2::Tree<'_>,
-    file_path: &str,
-) -> Result<Option<String>, git2::Error> {
-    let tree_path = Path::new(file_path);
-    let entry = match tree.get_path(tree_path) {
-        Ok(entry) => entry,
-        Err(err) if err.code() == git2::ErrorCode::NotFound => return Ok(None),
-        Err(err) => return Err(err),
-    };
-
-    let object = entry.to_object(repo)?;
-    let Some(blob) = object.as_blob() else {
-        return Ok(None);
-    };
-
-    Ok(Some(String::from_utf8_lossy(blob.content()).into_owned()))
-}
-
 fn write_repodna_state(repo: &Repository) -> io::Result<()> {
     repodna_paths::ensure_storage_dir(repo)?;
     let head = repo.head().ok();
@@ -2433,8 +1904,12 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn build_graph_inserts_commits_authors_files_and_edges() {
+    fn build_graph_uses_current_worktree_without_git_history_nodes_or_edges() {
         let (temp_dir, _repo) = init_repo_with_commits(&["first", "second", "third"]);
+        let src_dir = temp_dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+        std::fs::write(src_dir.join("lib.rs"), "fn run() {}\n")
+            .expect("rust file should be written");
 
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
@@ -2504,12 +1979,12 @@ mod tests {
             )
             .expect("hotspot count should succeed");
 
-        assert_eq!(report.scanned, 3);
-        assert_eq!(commit_count, 3);
-        assert_eq!(author_count, 1);
+        assert_eq!(report.scanned, 0);
+        assert_eq!(commit_count, 0);
+        assert_eq!(author_count, 0);
         assert!(file_count >= 1);
-        assert_eq!(authored_by_count, 3);
-        assert!(modifies_count >= 3);
+        assert_eq!(authored_by_count, 0);
+        assert_eq!(modifies_count, 0);
         assert_eq!(ownership_count, file_count);
         assert_eq!(hotspot_count, file_count);
         assert_eq!(report.ownership_files_computed as i64, file_count);
@@ -2541,10 +2016,10 @@ mod tests {
             )
             .expect("edge count query should succeed");
 
-        assert_eq!(first.commit_nodes_inserted, 2);
+        assert_eq!(first.commit_nodes_inserted, 0);
         assert_eq!(second.commit_nodes_inserted, 0);
-        assert_eq!(commit_count, 2);
-        assert_eq!(authored_by_count, 2);
+        assert_eq!(commit_count, 0);
+        assert_eq!(authored_by_count, 0);
     }
 
     #[test]
@@ -2895,7 +2370,7 @@ impl B {
     }
 
     #[test]
-    fn build_graph_computes_file_co_change_counts() {
+    fn build_graph_skips_file_co_change_counts_from_git_history() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -2920,48 +2395,22 @@ impl B {
 
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
-        assert!(report.co_change_pairs_processed >= 4);
+        assert_eq!(report.co_change_pairs_processed, 0);
 
         let db = Connection::open(report.db_path).expect("db should open");
-        let a_id = FileNode::from_path("src/a.rs").id;
-        let b_id = FileNode::from_path("src/b.rs").id;
-        let c_id = FileNode::from_path("src/c.rs").id;
+        let co_change_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE relation = 'CO_CHANGE'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("co-change count should succeed");
 
-        let ab_count: i64 = db
-            .query_row(
-                "SELECT CAST(COALESCE(json_extract(metadata, '$.count'), 0) AS INTEGER)
-                 FROM edges
-                 WHERE relation = 'CO_CHANGE' AND source = ?1 AND target = ?2",
-                params![a_id, b_id],
-                |row| row.get(0),
-            )
-            .expect("ab co-change should exist");
-        let ac_count: i64 = db
-            .query_row(
-                "SELECT CAST(COALESCE(json_extract(metadata, '$.count'), 0) AS INTEGER)
-                 FROM edges
-                 WHERE relation = 'CO_CHANGE' AND source = ?1 AND target = ?2",
-                params![FileNode::from_path("src/a.rs").id, c_id.clone()],
-                |row| row.get(0),
-            )
-            .expect("ac co-change should exist");
-        let bc_count: i64 = db
-            .query_row(
-                "SELECT CAST(COALESCE(json_extract(metadata, '$.count'), 0) AS INTEGER)
-                 FROM edges
-                 WHERE relation = 'CO_CHANGE' AND source = ?1 AND target = ?2",
-                params![FileNode::from_path("src/b.rs").id, c_id],
-                |row| row.get(0),
-            )
-            .expect("bc co-change should exist");
-
-        assert_eq!(ab_count, 2);
-        assert_eq!(ac_count, 1);
-        assert_eq!(bc_count, 1);
+        assert_eq!(co_change_count, 0);
     }
 
     #[test]
-    fn build_graph_maps_single_function_modification_to_commit() {
+    fn build_graph_skips_single_function_modification_from_git_diff() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -2989,29 +2438,19 @@ impl B {
 
         let allocate_id = rust_function_symbol_id("src/lib.rs", "allocate", 1);
         let evict_id = rust_function_symbol_id("src/lib.rs", "evict", 5);
-        let touch_commit_id = head_commit_node_id(&repo);
-
-        let allocate_edge_count: i64 = db
+        let modified_edge_count: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1 AND target = ?2",
-                params![touch_commit_id.clone(), allocate_id],
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND target IN (?1, ?2)",
+                params![allocate_id, evict_id],
                 |row| row.get(0),
             )
-            .expect("allocate edge count should succeed");
-        let evict_edge_count: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1 AND target = ?2",
-                params![touch_commit_id, evict_id],
-                |row| row.get(0),
-            )
-            .expect("evict edge count should succeed");
+            .expect("modified edge count should succeed");
 
-        assert_eq!(allocate_edge_count, 1);
-        assert_eq!(evict_edge_count, 0);
+        assert_eq!(modified_edge_count, 0);
     }
 
     #[test]
-    fn build_graph_maps_multiple_functions_modified_by_commit() {
+    fn build_graph_skips_multiple_function_modifications_from_git_diff() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -3036,21 +2475,20 @@ impl B {
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
-        let touch_commit_id = head_commit_node_id(&repo);
 
         let modified_functions: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1",
-                params![touch_commit_id],
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED'",
+                [],
                 |row| row.get(0),
             )
             .expect("modified function count should succeed");
 
-        assert_eq!(modified_functions, 2);
+        assert_eq!(modified_functions, 0);
     }
 
     #[test]
-    fn build_graph_maps_whole_file_rewrite_to_all_functions() {
+    fn build_graph_skips_whole_file_rewrite_function_edges_from_git_diff() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -3075,21 +2513,20 @@ impl B {
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
-        let rewrite_commit_id = head_commit_node_id(&repo);
 
         let modified_functions: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1",
-                params![rewrite_commit_id],
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED'",
+                [],
                 |row| row.get(0),
             )
             .expect("modified function count should succeed");
 
-        assert_eq!(modified_functions, 2);
+        assert_eq!(modified_functions, 0);
     }
 
     #[test]
-    fn build_graph_maps_function_rename_commit_to_current_function() {
+    fn build_graph_skips_function_rename_commit_edges_from_git_diff() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -3108,18 +2545,17 @@ impl B {
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
-        let rename_commit_id = head_commit_node_id(&repo);
         let reserve_id = rust_function_symbol_id("src/lib.rs", "reserve", 1);
 
         let reserve_edge_count: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1 AND target = ?2",
-                params![rename_commit_id, reserve_id],
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND target = ?1",
+                params![reserve_id],
                 |row| row.get(0),
             )
             .expect("renamed function edge count should succeed");
 
-        assert_eq!(reserve_edge_count, 1);
+        assert_eq!(reserve_edge_count, 0);
     }
 
     #[test]
@@ -3137,12 +2573,11 @@ impl B {
         let report = build_graph(temp_dir.path().to_str().expect("valid path"))
             .expect("build should succeed");
         let db = Connection::open(report.db_path).expect("db should open");
-        let noop_commit_id = head_commit_node_id(&repo);
 
         let modified_functions: i64 = db
             .query_row(
-                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED' AND source = ?1",
-                params![noop_commit_id],
+                "SELECT COUNT(*) FROM edges WHERE relation = 'MODIFIED'",
+                [],
                 |row| row.get(0),
             )
             .expect("modified function count should succeed");
@@ -3296,7 +2731,7 @@ impl B {
                 |row| row.get(0),
             )
             .expect("commit count should succeed");
-        assert_eq!(first_commit_count, 1);
+        assert_eq!(first_commit_count, 0);
 
         commit_files(
             &repo,
@@ -3316,7 +2751,7 @@ impl B {
             )
             .expect("commit count should succeed");
 
-        assert_eq!(commit_count, 2);
+        assert_eq!(commit_count, 0);
     }
 
     #[test]
@@ -3382,9 +2817,9 @@ impl B {
             )
             .expect("main-only commit count should succeed");
 
-        assert_eq!(commit_count, 2);
+        assert_eq!(commit_count, 0);
         assert_eq!(feature_commit_count, 0);
-        assert_eq!(main_commit_count, 1);
+        assert_eq!(main_commit_count, 0);
     }
 
     fn init_repo_with_commits(messages: &[&str]) -> (TempDir, Repository) {
@@ -3494,15 +2929,6 @@ impl B {
             &[&parent_commit],
         )
         .expect("empty commit should succeed");
-    }
-
-    fn head_commit_node_id(repo: &Repository) -> String {
-        let head = repo
-            .head()
-            .expect("head should exist")
-            .target()
-            .expect("head target should exist");
-        format!("commit_{}", head)
     }
 
     fn delete_and_commit_files(repo: &Repository, root: &Path, message: &str, files: &[&str]) {
