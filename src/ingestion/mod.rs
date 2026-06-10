@@ -58,7 +58,6 @@ struct FileRecord {
 struct NodeRecord {
     id: String,
     name: String,
-    summary: String,
     metadata: String,
 }
 
@@ -166,12 +165,11 @@ impl RustSymbolNode {
         }
     }
 
-    fn new_function_with_status(
+    fn new_function(
         file_path: &str,
         symbol_name: &str,
         start_line: usize,
         end_line: usize,
-        is_active: bool,
     ) -> Self {
         let node_type = RustSymbolKind::Function.as_node_type().to_string();
         let symbol_id = rust_function_symbol_id(file_path, symbol_name, start_line);
@@ -183,10 +181,7 @@ impl RustSymbolNode {
             "line": start_line,
             "start_line": start_line,
             "end_line": end_line,
-            "rust_symbol_kind": RustSymbolKind::Function.as_relation_hint(),
-            "is_active": is_active,
-            "deleted": !is_active,
-            "delete": !is_active
+            "rust_symbol_kind": RustSymbolKind::Function.as_relation_hint()
         })
         .to_string();
 
@@ -245,20 +240,13 @@ impl AuthorNode {
 
 impl FileNode {
     pub fn from_path(path: &str) -> Self {
-        Self::from_path_with_status(path, true)
-    }
-
-    pub fn from_path_with_status(path: &str, is_active: bool) -> Self {
         Self {
             summary: String::new(),
             id: format!("file_{}", sanitize_id(path)),
             node_type: "File".to_string(),
             name: path.to_string(),
             metadata: json!({
-                "path": path,
-                "is_active": is_active,
-                "deleted": !is_active,
-                "delete": !is_active
+                "path": path
             })
             .to_string(),
         }
@@ -267,20 +255,13 @@ impl FileNode {
 
 impl DirectoryNode {
     pub fn from_path(path: &str) -> Self {
-        Self::from_path_with_status(path, true)
-    }
-
-    pub fn from_path_with_status(path: &str, is_active: bool) -> Self {
         Self {
             summary: String::new(),
             id: format!("directory_{}", sanitize_id(path)),
             node_type: "Directory".to_string(),
             name: path.to_string(),
             metadata: json!({
-                "path": path,
-                "is_active": is_active,
-                "deleted": !is_active,
-                "delete": !is_active
+                "path": path
             })
             .to_string(),
         }
@@ -694,31 +675,26 @@ impl CommitRepository {
         Ok(directories)
     }
 
-    fn update_file_activity_statuses(
-        &self,
-        active_paths: &HashSet<String>,
-    ) -> rusqlite::Result<()> {
+    fn prune_files_not_in_paths(&self, active_paths: &HashSet<String>) -> rusqlite::Result<()> {
         let files = self.get_all_files()?;
         for file in files {
-            let file_node =
-                FileNode::from_path_with_status(&file.name, active_paths.contains(&file.name));
-            let _ = self.upsert_file_node(&file_node)?;
+            if !active_paths.contains(&file.name) {
+                self.delete_node_and_references(&file.id, "File")?;
+            }
         }
 
         Ok(())
     }
 
-    fn update_directory_activity_statuses(
+    fn prune_directories_not_in_paths(
         &self,
         active_paths: &HashSet<String>,
     ) -> rusqlite::Result<()> {
         let directories = self.get_all_directories()?;
         for directory in directories {
-            let directory_node = DirectoryNode::from_path_with_status(
-                &directory.name,
-                active_paths.contains(&directory.name),
-            );
-            let _ = self.upsert_directory_node(&directory_node)?;
+            if !active_paths.contains(&directory.name) {
+                self.delete_node_and_references(&directory.id, "Directory")?;
+            }
         }
 
         Ok(())
@@ -727,14 +703,13 @@ impl CommitRepository {
     fn get_all_functions(&self) -> rusqlite::Result<Vec<NodeRecord>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT id, name, COALESCE(summary, ''), COALESCE(metadata, '') FROM nodes WHERE type = 'Function' ORDER BY name")?;
+            .prepare("SELECT id, name, COALESCE(metadata, '') FROM nodes WHERE type = 'Function' ORDER BY name")?;
 
         let rows = stmt.query_map([], |row| {
             Ok(NodeRecord {
                 id: row.get(0)?,
                 name: row.get(1)?,
-                summary: row.get(2)?,
-                metadata: row.get(3)?,
+                metadata: row.get(2)?,
             })
         })?;
 
@@ -746,22 +721,31 @@ impl CommitRepository {
         Ok(functions)
     }
 
-    fn update_function_activity_statuses(
+    fn prune_functions_not_in_ids(
         &self,
         active_function_ids: &HashSet<String>,
     ) -> rusqlite::Result<()> {
         let functions = self.get_all_functions()?;
         for function in functions {
-            let is_active = active_function_ids.contains(&function.id);
-            let updated = RustSymbolNode {
-                summary: function.summary,
-                id: function.id,
-                node_type: "Function".to_string(),
-                name: function.name,
-                metadata: set_function_status_in_metadata(&function.metadata, is_active),
-            };
-            let _ = self.upsert_symbol_node(&updated)?;
+            if !active_function_ids.contains(&function.id) {
+                self.delete_node_and_references(&function.id, "Function")?;
+            }
         }
+
+        Ok(())
+    }
+
+    fn delete_node_and_references(&self, node_id: &str, entity_type: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM edges WHERE source = ?1 OR target = ?1",
+            params![node_id],
+        )?;
+        self.conn.execute(
+            "DELETE FROM metadata WHERE entity_type = ?1 AND entity_id = ?2",
+            params![entity_type, node_id],
+        )?;
+        self.conn
+            .execute("DELETE FROM nodes WHERE id = ?1", params![node_id])?;
 
         Ok(())
     }
@@ -1130,8 +1114,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                 collect_parent_directory_paths(path.strip_prefix(workdir).unwrap_or(path))
             })
             .collect::<HashSet<_>>();
-        repository.update_file_activity_statuses(&current_file_paths)?;
-        repository.update_directory_activity_statuses(&current_directory_paths)?;
+        repository.prune_files_not_in_paths(&current_file_paths)?;
+        repository.prune_directories_not_in_paths(&current_directory_paths)?;
 
         let rust_files = collect_rust_source_files(workdir)?;
         let mut rust_snapshots = Vec::<RustFileSnapshot>::new();
@@ -1218,13 +1202,14 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
             .iter()
             .flat_map(|snapshot| snapshot.function_spans.iter().map(|span| span.id.clone()))
             .collect::<HashSet<_>>();
-        repository.update_function_activity_statuses(&active_function_ids)?;
+        repository.prune_functions_not_in_ids(&active_function_ids)?;
 
         main_tree_edges_inserted = compute_and_store_main_tree(&repository, &rust_snapshots)?;
         main_flow_edges_inserted = compute_and_store_main_flow_tree(&repository, &rust_snapshots)?;
 
         modified_function_edges_inserted =
             index_commit_function_relationships(&repo, &repository, &rust_snapshots)?;
+        repository.prune_functions_not_in_ids(&active_function_ids)?;
     }
 
     let ownership_files_computed = repository.compute_and_store_file_ownership()?;
@@ -1494,17 +1479,6 @@ fn extract_file_path_from_metadata(metadata: &str) -> String {
         .unwrap_or_default()
 }
 
-fn set_function_status_in_metadata(metadata: &str, is_active: bool) -> String {
-    let mut parsed =
-        serde_json::from_str::<serde_json::Value>(metadata).unwrap_or_else(|_| json!({}));
-    if let Some(object) = parsed.as_object_mut() {
-        object.insert("is_active".to_string(), json!(is_active));
-        object.insert("deleted".to_string(), json!(!is_active));
-        object.insert("delete".to_string(), json!(!is_active));
-    }
-    parsed.to_string()
-}
-
 fn function_file_key(file_path: &str, function_name: &str) -> String {
     format!("{}::{}", file_path, function_name)
 }
@@ -1651,7 +1625,7 @@ fn compute_and_store_main_tree(
     repository: &CommitRepository,
     snapshots: &[RustFileSnapshot],
 ) -> rusqlite::Result<usize> {
-    let adjacency = get_active_call_adjacency(repository)?;
+    let adjacency = get_call_adjacency(repository)?;
     let mut main_roots = Vec::<String>::new();
 
     for snapshot in snapshots {
@@ -1735,7 +1709,7 @@ fn compute_and_store_main_flow_tree(
         }
     }
 
-    let adjacency = get_active_call_adjacency(repository)?;
+    let adjacency = get_call_adjacency(repository)?;
 
     let mut discovered_files = HashSet::<String>::new();
     let mut expanded_functions = HashSet::<String>::new();
@@ -1830,7 +1804,7 @@ fn compute_and_store_main_flow_tree(
     Ok(inserted)
 }
 
-fn get_active_call_adjacency(
+fn get_call_adjacency(
     repository: &CommitRepository,
 ) -> rusqlite::Result<HashMap<String, Vec<String>>> {
     let mut adjacency = HashMap::<String, Vec<String>>::new();
@@ -1841,9 +1815,7 @@ fn get_active_call_adjacency(
          JOIN nodes target_node ON target_node.id = e.target
          WHERE e.relation = 'CALLS'
            AND source_node.type = 'Function'
-           AND target_node.type = 'Function'
-           AND COALESCE(CAST(json_extract(source_node.metadata, '$.is_active') AS INTEGER), 1) = 1
-           AND COALESCE(CAST(json_extract(target_node.metadata, '$.is_active') AS INTEGER), 1) = 1",
+           AND target_node.type = 'Function'",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1990,12 +1962,11 @@ fn extract_rust_symbols(
     let mut seen = HashSet::<String>::new();
 
     for function in extract_rust_function_spans(file_path, content)? {
-        let symbol = RustSymbolNode::new_function_with_status(
+        let symbol = RustSymbolNode::new_function(
             &function.file_path,
             &function.name,
             function.start_line,
             function.end_line,
-            true,
         );
         if seen.insert(symbol.id.clone()) {
             symbols.push(symbol);
@@ -2305,25 +2276,24 @@ fn upsert_historical_function_nodes(
         if !should_index_rust_file(&function.file_path) {
             continue;
         }
+        if !current_function_ids.contains(&function.id) {
+            continue;
+        }
 
-        let is_active = current_function_ids.contains(&function.id);
         let node = RustSymbolNode {
             summary: String::new(),
             id: function.id.clone(),
             node_type: "Function".to_string(),
             name: function.name.clone(),
-            metadata: set_function_status_in_metadata(
-                &json!({
-                    "file": function.file_path,
-                    "symbol_key": function_symbol_key(&function.file_path, &function.name, function.start_line),
-                    "line": function.start_line,
-                    "start_line": function.start_line,
-                    "end_line": function.end_line,
-                    "rust_symbol_kind": "function"
-                })
-                .to_string(),
-                is_active,
-            ),
+            metadata: json!({
+                "file": function.file_path,
+                "symbol_key": function_symbol_key(&function.file_path, &function.name, function.start_line),
+                "line": function.start_line,
+                "start_line": function.start_line,
+                "end_line": function.end_line,
+                "rust_symbol_kind": "function"
+            })
+            .to_string(),
         };
         let _ = repository.upsert_symbol_node(&node)?;
     }
@@ -3181,7 +3151,7 @@ impl B {
     }
 
     #[test]
-    fn build_graph_keeps_deleted_function_nodes_as_inactive() {
+    fn build_graph_removes_deleted_function_nodes() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -3205,32 +3175,19 @@ impl B {
         let db = Connection::open(report.db_path).expect("db should open");
         let allocate_id = rust_function_symbol_id("src/lib.rs", "allocate", 1);
 
-        let metadata_raw: String = db
+        let deleted_function_count: i64 = db
             .query_row(
-                "SELECT metadata FROM nodes WHERE id = ?1",
+                "SELECT COUNT(*) FROM nodes WHERE id = ?1",
                 params![allocate_id],
                 |row| row.get(0),
             )
-            .expect("deleted function node should still exist");
+            .expect("deleted function count should succeed");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&metadata_raw).expect("metadata should parse");
-        assert_eq!(
-            parsed.get("delete").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed.get("deleted").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed.get("is_active").and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
+        assert_eq!(deleted_function_count, 0);
     }
 
     #[test]
-    fn build_graph_keeps_deleted_file_nodes_as_inactive() {
+    fn build_graph_removes_deleted_file_nodes() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -3246,32 +3203,19 @@ impl B {
         let db = Connection::open(report.db_path).expect("db should open");
         let temp_file_id = FileNode::from_path("src/temp.rs").id;
 
-        let metadata_raw: String = db
+        let deleted_file_count: i64 = db
             .query_row(
-                "SELECT metadata FROM nodes WHERE id = ?1",
+                "SELECT COUNT(*) FROM nodes WHERE id = ?1",
                 params![temp_file_id],
                 |row| row.get(0),
             )
-            .expect("deleted file node should still exist");
+            .expect("deleted file count should succeed");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&metadata_raw).expect("metadata should parse");
-        assert_eq!(
-            parsed.get("delete").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed.get("deleted").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed.get("is_active").and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
+        assert_eq!(deleted_file_count, 0);
     }
 
     #[test]
-    fn build_graph_keeps_deleted_directory_nodes_as_inactive() {
+    fn build_graph_removes_deleted_directory_nodes() {
         let (temp_dir, repo) = init_repo_with_commits(&["seed"]);
 
         commit_files(
@@ -3295,28 +3239,15 @@ impl B {
         let db = Connection::open(report.db_path).expect("db should open");
         let directory_id = DirectoryNode::from_path("test/function_diff_overlap").id;
 
-        let metadata_raw: String = db
+        let deleted_directory_count: i64 = db
             .query_row(
-                "SELECT metadata FROM nodes WHERE id = ?1",
+                "SELECT COUNT(*) FROM nodes WHERE id = ?1",
                 params![directory_id],
                 |row| row.get(0),
             )
-            .expect("deleted directory node should still exist");
+            .expect("deleted directory count should succeed");
 
-        let parsed: serde_json::Value =
-            serde_json::from_str(&metadata_raw).expect("metadata should parse");
-        assert_eq!(
-            parsed.get("delete").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed.get("deleted").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            parsed.get("is_active").and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
+        assert_eq!(deleted_directory_count, 0);
     }
 
     #[test]

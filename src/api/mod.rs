@@ -820,7 +820,6 @@ fn resolve_function_selector_to_id(
              FROM nodes
              WHERE type = 'Function'
                AND id = ?1
-               AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
              LIMIT 1",
             params![trimmed],
             |row| row.get(0),
@@ -837,7 +836,6 @@ fn resolve_function_selector_to_id(
              FROM nodes
              WHERE type = 'Function'
                AND name = ?1
-               AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
              ORDER BY LENGTH(COALESCE(json_extract(metadata, '$.file'), '')) ASC,
                       CAST(COALESCE(json_extract(metadata, '$.line'), 0) AS INTEGER) ASC,
                       id ASC
@@ -872,7 +870,6 @@ fn search_base_functions_in_main_tree_from_conn(
                ON outgoing.source = n.id
               AND outgoing.relation = 'MAIN_TREE'
              WHERE n.type = 'Function'
-               AND COALESCE(CAST(json_extract(n.metadata, '$.is_active') AS INTEGER), 1) = 1
                AND (?1 = '' OR n.name LIKE ?2 OR COALESCE(json_extract(n.metadata, '$.file'), '') LIKE ?2)
              GROUP BY n.id, n.name, n.metadata
              HAVING COUNT(DISTINCT outgoing.target) = 0
@@ -909,8 +906,7 @@ fn get_function_call_by_from_conn(
             "SELECT summary, id, type, name, metadata
              FROM nodes
              WHERE id = ?1
-               AND type = 'Function'
-               AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1",
+               AND type = 'Function'",
             params![function_id],
             node_record_from_row,
         )
@@ -924,7 +920,6 @@ fn get_function_call_by_from_conn(
              WHERE e.relation = 'MAIN_TREE'
                AND e.target = ?1
                AND n.type = 'Function'
-               AND COALESCE(CAST(json_extract(n.metadata, '$.is_active') AS INTEGER), 1) = 1
              ORDER BY n.name ASC,
                       LENGTH(COALESCE(json_extract(n.metadata, '$.file'), '')) ASC,
                       CAST(COALESCE(json_extract(n.metadata, '$.line'), 0) AS INTEGER) ASC,
@@ -1826,13 +1821,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_function_search_returns_only_active_main_tree_leaves() {
+    fn base_function_search_returns_main_tree_leaves() {
         let conn = Connection::open_in_memory().expect("in-memory db should open");
         conn.execute_batch(
             "CREATE TABLE nodes (
                 id TEXT PRIMARY KEY,
                 type TEXT NOT NULL,
                 name TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
                 metadata TEXT
             );
             CREATE TABLE edges (
@@ -1847,41 +1843,23 @@ mod tests {
 
         conn.execute(
             "INSERT INTO nodes (id, type, name, metadata) VALUES (?1, 'Function', 'main', ?2)",
-            params![
-                "function_main",
-                r#"{"file":"src/main.rs","line":1,"is_active":true}"#
-            ],
+            params!["function_main", r#"{"file":"src/main.rs","line":1}"#],
         )
         .expect("main node should insert");
         conn.execute(
             "INSERT INTO nodes (id, type, name, metadata) VALUES (?1, 'Function', 'worker', ?2)",
-            params![
-                "function_worker",
-                r#"{"file":"src/lib.rs","line":10,"is_active":true}"#
-            ],
+            params!["function_worker", r#"{"file":"src/lib.rs","line":10}"#],
         )
         .expect("worker node should insert");
         conn.execute(
             "INSERT INTO nodes (id, type, name, metadata) VALUES (?1, 'Function', 'leaf', ?2)",
-            params![
-                "function_leaf",
-                r#"{"file":"src/lib.rs","line":30,"is_active":true}"#
-            ],
+            params!["function_leaf", r#"{"file":"src/lib.rs","line":30}"#],
         )
         .expect("leaf node should insert");
-        conn.execute(
-            "INSERT INTO nodes (id, type, name, metadata) VALUES (?1, 'Function', 'deleted_leaf', ?2)",
-            params![
-                "function_deleted_leaf",
-                r#"{"file":"src/old.rs","line":8,"is_active":false,"deleted":true}"#
-            ],
-        )
-        .expect("deleted leaf node should insert");
 
         for (source, target) in [
             ("function_main", "function_worker"),
             ("function_worker", "function_leaf"),
-            ("function_main", "function_deleted_leaf"),
         ] {
             conn.execute(
                 "INSERT INTO edges (source, target, relation, metadata) VALUES (?1, ?2, 'MAIN_TREE', NULL)",
@@ -1901,13 +1879,14 @@ mod tests {
     }
 
     #[test]
-    fn function_call_by_returns_active_main_tree_callers() {
+    fn function_call_by_returns_main_tree_callers() {
         let conn = Connection::open_in_memory().expect("in-memory db should open");
         conn.execute_batch(
             "CREATE TABLE nodes (
                 id TEXT PRIMARY KEY,
                 type TEXT NOT NULL,
                 name TEXT NOT NULL,
+                summary TEXT NOT NULL DEFAULT '',
                 metadata TEXT
             );
             CREATE TABLE edges (
@@ -1924,22 +1903,17 @@ mod tests {
             (
                 "function_main",
                 "main",
-                r#"{"file":"src/main.rs","line":1,"is_active":true}"#,
+                r#"{"file":"src/main.rs","line":1}"#,
             ),
             (
                 "function_worker",
                 "worker",
-                r#"{"file":"src/lib.rs","line":10,"is_active":true}"#,
+                r#"{"file":"src/lib.rs","line":10}"#,
             ),
             (
                 "function_leaf",
                 "leaf",
-                r#"{"file":"src/lib.rs","line":30,"is_active":true}"#,
-            ),
-            (
-                "function_deleted_caller",
-                "old_worker",
-                r#"{"file":"src/old.rs","line":4,"is_active":false,"deleted":true}"#,
+                r#"{"file":"src/lib.rs","line":30}"#,
             ),
         ] {
             conn.execute(
@@ -1952,7 +1926,6 @@ mod tests {
         for (source, target) in [
             ("function_main", "function_leaf"),
             ("function_worker", "function_leaf"),
-            ("function_deleted_caller", "function_leaf"),
         ] {
             conn.execute(
                 "INSERT INTO edges (source, target, relation, metadata) VALUES (?1, ?2, 'MAIN_TREE', NULL)",

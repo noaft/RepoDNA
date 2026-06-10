@@ -24,7 +24,7 @@ struct SearchFunctionsParams {
     /// Exact-ish function lookup only: pass one function name, function id, Rust symbol path, or file path hint.
     /// Do not pass natural language, behavior descriptions, or many unrelated words; use search_function_contexts for that.
     query: String,
-    /// Maximum number of active function nodes to return. Defaults to 20 and is clamped to 1..=100.
+    /// Maximum number of function nodes to return. Defaults to 20 and is clamped to 1..=100.
     limit: Option<usize>,
 }
 
@@ -32,7 +32,7 @@ struct SearchFunctionsParams {
 struct SearchFunctionContextsParams {
     /// Natural-language or behavior-oriented query for saved function summaries, such as "starts MCP server" or "builds repository graph".
     query: String,
-    /// Maximum number of active function contexts to return. Defaults to 20 and is clamped to 1..=100.
+    /// Maximum number of function contexts to return. Defaults to 20 and is clamped to 1..=100.
     limit: Option<usize>,
 }
 
@@ -97,7 +97,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Exact-ish function lookup in RepoDNA's graph. Use ONLY when you already know one concrete function name, function id, Rust symbol path, or file path hint. Do NOT pass natural language, behavior descriptions, or combined keywords like 'run main build graph CLI entrypoint'; use search_function_contexts for that. Parameter query should be a short single lookup hint, e.g. 'serve_graph_api', 'src/api/mod.rs', or an exact function_id. Returns active function nodes with names, ids, summaries, and metadata."
+        description = "Exact-ish function lookup in RepoDNA's graph. Use ONLY when you already know one concrete function name, function id, Rust symbol path, or file path hint. Do NOT pass natural language, behavior descriptions, or combined keywords like 'run main build graph CLI entrypoint'; use search_function_contexts for that. Parameter query should be a short single lookup hint, e.g. 'serve_graph_api', 'src/api/mod.rs', or an exact function_id. Returns function nodes with names, ids, summaries, and metadata."
     )]
     async fn search_functions(
         &self,
@@ -109,7 +109,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Search saved function context by summary. Use this FIRST for natural-language, behavioral, or semantic questions about what code does, such as 'CLI entrypoint for build/update' or 'starts MCP stdio server'. Parameter query may be a phrase or sentence. This searches only active functions with non-empty summaries, ranks matches by summary phrase and term overlap, and returns node-shaped JSON results. If this returns no useful result, use search_functions only with a concrete function name/id/file hint, then read source/add_function_context as needed."
+        description = "Search saved function context by summary. Use this FIRST for natural-language, behavioral, or semantic questions about what code does, such as 'CLI entrypoint for build/update' or 'starts MCP stdio server'. Parameter query may be a phrase or sentence. This searches functions with non-empty summaries, ranks matches by summary phrase and term overlap, and returns node-shaped JSON results. If this returns no useful result, use search_functions only with a concrete function name/id/file hint, then read source/add_function_context as needed."
     )]
     async fn search_function_contexts(
         &self,
@@ -175,7 +175,6 @@ fn search_function_nodes(
             metadata
          FROM nodes
          WHERE type = 'Function'
-           AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
            AND (
                ?1 = ''
                OR id LIKE ?2
@@ -246,7 +245,6 @@ fn search_function_contexts(
             metadata
          FROM nodes
          WHERE type = 'Function'
-           AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
            AND TRIM(COALESCE(summary, '')) <> ''",
     )?;
 
@@ -329,23 +327,19 @@ fn add_function_context_with_embedder(
     }
 
     ensure_function_summary_embedding_schema(&conn)?;
-    let active_function_exists: bool = conn.query_row(
+    let function_exists: bool = conn.query_row(
         "SELECT EXISTS(
             SELECT 1
             FROM nodes
             WHERE id = ?1
               AND type = 'Function'
-              AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1
         )",
         [trimmed_id],
         |row| row.get(0),
     )?;
 
-    if !active_function_exists {
-        bail!(
-            "active function node not found for function_id '{}'",
-            trimmed_id
-        );
+    if !function_exists {
+        bail!("function node not found for function_id '{}'", trimmed_id);
     }
 
     let embedding = embedder(trimmed_summary).context("failed to embed function summary")?;
@@ -362,8 +356,7 @@ fn add_function_context_with_embedder(
         "UPDATE nodes
          SET summary = ?2
          WHERE id = ?1
-           AND type = 'Function'
-           AND COALESCE(CAST(json_extract(metadata, '$.is_active') AS INTEGER), 1) = 1",
+           AND type = 'Function'",
         params![trimmed_id, trimmed_summary],
     )?;
     tx.execute(
@@ -477,16 +470,13 @@ mod tests {
              VALUES (?1, 'Function', 'build_graph', '', ?2)",
             params![
                 "function:src/main.rs:build_graph",
-                r#"{"file":"src/main.rs","is_active":true}"#
+                r#"{"file":"src/main.rs"}"#
             ],
         )?;
         conn.execute(
             "INSERT INTO nodes (id, type, name, summary, metadata)
              VALUES (?1, 'Function', 'old_graph', '', ?2)",
-            params![
-                "function:src/old.rs:old_graph",
-                r#"{"file":"src/old.rs","is_active":false}"#
-            ],
+            params!["function:src/old.rs:old_graph", r#"{"file":"src/old.rs"}"#],
         )?;
         Ok(file)
     }
@@ -606,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn add_function_context_rejects_missing_or_inactive_function() -> Result<()> {
+    fn add_function_context_rejects_missing_function() -> Result<()> {
         let db = test_db()?;
 
         let missing = add_function_context_with_embedder(
@@ -620,21 +610,7 @@ mod tests {
             missing
                 .unwrap_err()
                 .to_string()
-                .contains("active function node not found")
-        );
-
-        let inactive = add_function_context_with_embedder(
-            db.path(),
-            "function:src/old.rs:old_graph",
-            "Old graph builder.",
-            fake_embed,
-        );
-        assert!(inactive.is_err());
-        assert!(
-            inactive
-                .unwrap_err()
-                .to_string()
-                .contains("active function node not found")
+                .contains("function node not found")
         );
 
         Ok(())

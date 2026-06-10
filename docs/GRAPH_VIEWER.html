@@ -965,15 +965,6 @@
       }
     }
 
-    function isDeletedNode(node) {
-      const metadata = parseMetadata(node.metadata);
-      if (!metadata || typeof metadata !== "object") {
-        return false;
-      }
-
-      return metadata.delete === true || metadata.deleted === true || metadata.is_active === false;
-    }
-
     function getNodeColor(type) {
       const normalized = String(type || "").toLowerCase();
       if (normalized === "commit") {
@@ -1006,11 +997,6 @@
     function getHeatColor(type, hotspotLevel, metadata) {
       const normalizedType = String(type || "").toLowerCase();
       const normalizedHotspot = String(hotspotLevel || "").toLowerCase();
-      const parsedMetadata = parseMetadata(metadata);
-
-      if (parsedMetadata && (parsedMetadata.delete === true || parsedMetadata.deleted === true || parsedMetadata.is_active === false)) {
-        return "#9ca3af";
-      }
 
       if (normalizedType === "file" || normalizedType.includes("function")) {
         if (normalizedHotspot === "high") {
@@ -1171,9 +1157,6 @@
         if (insights.file_insights) {
           lines.push("");
           lines.push(`Commits touched: ${insights.file_insights.commit_count}`);
-          if (isDeletedNode(insights.node)) {
-            lines.push("File status: Deleted");
-          }
           if (insights.file_insights.hotspot) {
             lines.push(`Hotspot: ${insights.file_insights.hotspot}`);
           }
@@ -1209,9 +1192,6 @@
           lines.push(`Function: ${insights.function_insights.function_name}`);
           lines.push(`Function file: ${insights.function_insights.file}`);
           lines.push(`Function line: ${insights.function_insights.line}`);
-          if (isDeletedNode(insights.node)) {
-            lines.push("Function status: Deleted");
-          }
           lines.push(`Function changes found: ${insights.function_insights.commit_count}`);
           if (Array.isArray(insights.function_insights.neighbors) && insights.function_insights.neighbors.length > 0) {
             lines.push(`Neighbors: ${insights.function_insights.neighbors.join(", ")}`);
