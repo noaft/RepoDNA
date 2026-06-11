@@ -42,6 +42,14 @@ struct AddFunctionContextParams {
     summary: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct UpdateFunctionDescriptionParams {
+    /// Exact function id returned by search_functions.
+    function_id: String,
+    /// Replacement high-level description of what the function is for.
+    description: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 struct FunctionNodeResult {
     summary: String,
@@ -65,6 +73,12 @@ struct SearchFunctionContextsResponse {
 struct AddFunctionContextResponse {
     function_id: String,
     summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+struct UpdateFunctionDescriptionResponse {
+    function_id: String,
+    description: String,
 }
 
 #[derive(Clone)]
@@ -131,6 +145,21 @@ impl RepoDnaMcp {
         }): Parameters<AddFunctionContextParams>,
     ) -> Result<Json<AddFunctionContextResponse>, String> {
         add_function_context(&self.db_path, &function_id, &summary)
+            .map(Json)
+            .map_err(|err| err.to_string())
+    }
+
+    #[tool(
+        description = "Update the durable description for an existing function node and regenerate its summary embedding. Use this when a saved function description is stale, incomplete, or wrong. Requires an exact function_id from search_functions and a replacement description."
+    )]
+    async fn update_function_description(
+        &self,
+        Parameters(UpdateFunctionDescriptionParams {
+            function_id,
+            description,
+        }): Parameters<UpdateFunctionDescriptionParams>,
+    ) -> Result<Json<UpdateFunctionDescriptionResponse>, String> {
+        update_function_description(&self.db_path, &function_id, &description)
             .map(Json)
             .map_err(|err| err.to_string())
     }
@@ -300,6 +329,33 @@ fn add_function_context(
     summary: &str,
 ) -> Result<AddFunctionContextResponse> {
     add_function_context_with_embedder(db_path, function_id, summary, embeddings::embed_text)
+}
+
+fn update_function_description(
+    db_path: &Path,
+    function_id: &str,
+    description: &str,
+) -> Result<UpdateFunctionDescriptionResponse> {
+    update_function_description_with_embedder(
+        db_path,
+        function_id,
+        description,
+        embeddings::embed_text,
+    )
+}
+
+fn update_function_description_with_embedder(
+    db_path: &Path,
+    function_id: &str,
+    description: &str,
+    embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
+) -> Result<UpdateFunctionDescriptionResponse> {
+    let response = add_function_context_with_embedder(db_path, function_id, description, embedder)?;
+
+    Ok(UpdateFunctionDescriptionResponse {
+        function_id: response.function_id,
+        description: response.summary,
+    })
 }
 
 fn add_function_context_with_embedder(
@@ -534,6 +590,55 @@ mod tests {
     }
 
     #[test]
+    fn update_function_description_replaces_summary_and_regenerates_embedding() -> Result<()> {
+        let db = test_db()?;
+
+        add_function_context_with_embedder(
+            db.path(),
+            "function:src/main.rs:build_graph",
+            "Old description.",
+            fake_embed_from_text,
+        )?;
+
+        let conn = Connection::open(db.path())?;
+        let (old_hash, old_embedding): (String, Vec<u8>) = conn.query_row(
+            "SELECT summary_hash, embedding
+             FROM function_summary_embeddings
+             WHERE function_id = ?1",
+            ["function:src/main.rs:build_graph"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        drop(conn);
+
+        let response = update_function_description_with_embedder(
+            db.path(),
+            "function:src/main.rs:build_graph",
+            "New description used for retrieval.",
+            fake_embed_from_text,
+        )?;
+
+        assert_eq!(response.function_id, "function:src/main.rs:build_graph");
+        assert_eq!(response.description, "New description used for retrieval.");
+
+        let conn = Connection::open(db.path())?;
+        let (stored_summary, new_hash, new_embedding): (String, String, Vec<u8>) = conn
+            .query_row(
+                "SELECT nodes.summary, function_summary_embeddings.summary_hash, function_summary_embeddings.embedding
+                 FROM nodes
+                 JOIN function_summary_embeddings ON function_summary_embeddings.function_id = nodes.id
+                 WHERE nodes.id = ?1",
+                ["function:src/main.rs:build_graph"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        assert_eq!(stored_summary, "New description used for retrieval.");
+        assert_ne!(new_hash, old_hash);
+        assert_ne!(new_embedding, old_embedding);
+
+        Ok(())
+    }
+
+    #[test]
     fn search_functions_does_not_match_saved_summary_context() -> Result<()> {
         let db = test_db()?;
         add_function_context_with_embedder(
@@ -644,6 +749,17 @@ mod tests {
         Ok(embeddings::EmbeddingResult {
             model: "test-openai-compatible-model".to_string(),
             vector: vec![0.1, 0.2, 0.3],
+        })
+    }
+
+    fn fake_embed_from_text(text: &str) -> Result<embeddings::EmbeddingResult> {
+        assert!(!text.trim().is_empty());
+        Ok(embeddings::EmbeddingResult {
+            model: "test-openai-compatible-model".to_string(),
+            vector: vec![
+                text.len() as f32,
+                text.bytes().next().unwrap_or_default() as f32,
+            ],
         })
     }
 }
