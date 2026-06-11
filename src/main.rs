@@ -102,13 +102,14 @@ fn main() {
             .map(|parts| parts.join(" "))
             .unwrap_or_default();
 
-        match embeddings::embed_text_with_nomic(&text) {
+        match embeddings::embed_text(&text) {
             Ok(embedding) => {
                 println!(
                     "Embedding generated with {} dimensions.",
-                    embeddings::NOMIC_EMBEDDING_DIMENSIONS
+                    embedding.vector.len()
                 );
-                println!("Vector length: {}", embedding.len());
+                println!("Model: {}", embedding.model);
+                println!("Vector length: {}", embedding.vector.len());
             }
             Err(err) => {
                 eprintln!("Embedding failed: {err}");

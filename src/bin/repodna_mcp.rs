@@ -17,8 +17,6 @@ use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-const NOMIC_EMBEDDING_MODEL: &str = "nomic-ai/nomic-embed-text-v1.5";
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SearchFunctionsParams {
     /// Exact-ish function lookup only: pass one function name, function id, Rust symbol path, or file path hint.
@@ -305,7 +303,7 @@ fn add_function_context(
         db_path,
         function_id,
         summary,
-        embeddings::embed_text_with_nomic,
+        embeddings::embed_text,
     )
 }
 
@@ -313,7 +311,7 @@ fn add_function_context_with_embedder(
     db_path: &Path,
     function_id: &str,
     summary: &str,
-    embedder: impl Fn(&str) -> Result<Vec<f32>>,
+    embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
 ) -> Result<AddFunctionContextResponse> {
     let mut conn = open_existing_graph_db(db_path)?;
     let trimmed_id = function_id.trim();
@@ -343,12 +341,12 @@ fn add_function_context_with_embedder(
     }
 
     let embedding = embedder(trimmed_summary).context("failed to embed function summary")?;
-    if embedding.is_empty() {
+    if embedding.vector.is_empty() {
         bail!("embedding model returned an empty vector");
     }
 
-    let dimensions = embedding.len();
-    let embedding_blob = encode_embedding_blob(&embedding);
+    let dimensions = embedding.vector.len();
+    let embedding_blob = encode_embedding_blob(&embedding.vector);
     let summary_hash = stable_summary_hash(trimmed_summary);
 
     let tx = conn.transaction()?;
@@ -377,7 +375,7 @@ fn add_function_context_with_embedder(
             updated_at = excluded.updated_at",
         params![
             trimmed_id,
-            NOMIC_EMBEDDING_MODEL,
+            embedding.model,
             dimensions as i64,
             summary_hash,
             embedding_blob
@@ -532,7 +530,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
 
-        assert_eq!(model, "nomic-ai/nomic-embed-text-v1.5");
+        assert_eq!(model, "test-openai-compatible-model");
         assert_eq!(dimensions, 3);
         assert!(!summary_hash.is_empty());
         assert_eq!(decode_embedding_blob(&embedding), vec![0.1, 0.2, 0.3]);
@@ -646,8 +644,11 @@ mod tests {
         Ok(())
     }
 
-    fn fake_embed(text: &str) -> Result<Vec<f32>> {
+    fn fake_embed(text: &str) -> Result<embeddings::EmbeddingResult> {
         assert!(!text.trim().is_empty());
-        Ok(vec![0.1, 0.2, 0.3])
+        Ok(embeddings::EmbeddingResult {
+            model: "test-openai-compatible-model".to_string(),
+            vector: vec![0.1, 0.2, 0.3],
+        })
     }
 }
