@@ -47,6 +47,7 @@ pub fn embed_text_with_settings(
     }
 }
 
+#[allow(dead_code)]
 pub fn embed_text_with_nomic(text: &str) -> Result<Vec<f32>> {
     let trimmed = validate_embedding_text(text)?;
     embed_trimmed_text_with_nomic(trimmed)
@@ -175,5 +176,17 @@ mod tests {
         assert_eq!(result.vector, vec![0.1, 0.2]);
 
         Ok(())
+    }
+
+    #[test]
+    fn openai_compatible_embeddings_require_api_key_before_request() {
+        let settings = crate::settings::Settings::from_pairs([
+            ("REPODNA_EMBEDDING_PROVIDER", "openai"),
+            ("REPODNA_EMBEDDING_MODEL", "text-embedding-3-small"),
+        ]);
+
+        let error = embed_text_with_settings("search text", &settings.embedding).unwrap_err();
+
+        assert!(error.to_string().contains("OPENAI_API_KEY is required"));
     }
 }

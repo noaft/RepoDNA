@@ -129,6 +129,10 @@ RepoDNA reads optional environment settings from [src/settings.rs](/abs/path/d:/
 
 - `REPODNA_HOME`: override the default RepoDNA storage root. RepoDNA creates one graph directory per repository under this root.
 - `REPODNA_DB_PATH`: pin RepoDNA to one fixed SQLite file. Use this only when you intentionally want to manage the database path yourself.
+- `REPODNA_EMBEDDING_PROVIDER`: choose the embedding backend for saved function summaries. Defaults to local `nomic`; set to `openai` for OpenAI-compatible embeddings APIs.
+- `REPODNA_EMBEDDING_MODEL`: choose the embedding model when `REPODNA_EMBEDDING_PROVIDER=openai`. Defaults to `text-embedding-3-small`; the local `nomic` provider always uses `nomic-ai/nomic-embed-text-v1.5`.
+- `OPENAI_API_KEY`: required when `REPODNA_EMBEDDING_PROVIDER=openai`.
+- `OPENAI_BASE_URL`: optional OpenAI-compatible base URL. Defaults to `https://api.openai.com/v1`; use values such as `http://localhost:11434/v1` for local compatible servers.
 
 Default storage locations:
 
@@ -176,6 +180,21 @@ Use `REPODNA_DB_PATH` only for an explicit per-repo database path, such as:
 ```powershell
 $env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\repo-a\graph.db'
 cargo run -- build D:\Git\RepoA
+```
+
+Use an OpenAI-compatible embedding backend when adding function context:
+
+```powershell
+$env:REPODNA_EMBEDDING_PROVIDER='openai'
+$env:REPODNA_EMBEDDING_MODEL='text-embedding-3-small'
+$env:OPENAI_API_KEY='sk-...'
+cargo run --bin repodna_mcp -- D:\Git\RepoDNA
+```
+
+For a local compatible server, also set:
+
+```powershell
+$env:OPENAI_BASE_URL='http://localhost:11434/v1'
 ```
 
 ## What Success Looks Like :dart:

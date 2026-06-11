@@ -95,15 +95,15 @@ impl EmbeddingSettings {
             _ => EmbeddingProvider::Nomic,
         };
 
-        let default_model = match provider {
-            EmbeddingProvider::Nomic => NOMIC_EMBEDDING_MODEL,
-            EmbeddingProvider::OpenAi => DEFAULT_OPENAI_EMBEDDING_MODEL,
+        let model = match provider {
+            EmbeddingProvider::Nomic => NOMIC_EMBEDDING_MODEL.to_string(),
+            EmbeddingProvider::OpenAi => lookup_trimmed(&mut lookup, ENV_EMBEDDING_MODEL)
+                .unwrap_or_else(|| DEFAULT_OPENAI_EMBEDDING_MODEL.to_string()),
         };
 
         Self {
             provider,
-            model: lookup_trimmed(&mut lookup, ENV_EMBEDDING_MODEL)
-                .unwrap_or_else(|| default_model.to_string()),
+            model,
             openai_api_key: lookup_trimmed(&mut lookup, ENV_OPENAI_API_KEY),
             openai_base_url: lookup_trimmed(&mut lookup, ENV_OPENAI_BASE_URL)
                 .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string()),
@@ -129,17 +129,11 @@ fn env_path(key: &str) -> Option<PathBuf> {
     (!path.as_os_str().is_empty()).then_some(path)
 }
 
-fn lookup_path(
-    lookup: &mut impl FnMut(&str) -> Option<String>,
-    key: &str,
-) -> Option<PathBuf> {
+fn lookup_path(lookup: &mut impl FnMut(&str) -> Option<String>, key: &str) -> Option<PathBuf> {
     lookup_trimmed(lookup, key).map(PathBuf::from)
 }
 
-fn lookup_trimmed(
-    lookup: &mut impl FnMut(&str) -> Option<String>,
-    key: &str,
-) -> Option<String> {
+fn lookup_trimmed(lookup: &mut impl FnMut(&str) -> Option<String>, key: &str) -> Option<String> {
     lookup(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -153,15 +147,12 @@ mod tests {
     fn settings_default_to_local_nomic_embeddings() {
         let settings = Settings::from_pairs([]);
 
+        assert_eq!(settings.embedding.provider, EmbeddingProvider::Nomic);
+        assert_eq!(settings.embedding.model, "nomic-ai/nomic-embed-text-v1.5");
         assert_eq!(
-            settings.embedding.provider,
-            EmbeddingProvider::Nomic
+            settings.embedding.openai_base_url,
+            "https://api.openai.com/v1"
         );
-        assert_eq!(
-            settings.embedding.model,
-            "nomic-ai/nomic-embed-text-v1.5"
-        );
-        assert_eq!(settings.embedding.openai_base_url, "https://api.openai.com/v1");
         assert_eq!(settings.embedding.openai_api_key, None);
     }
 
@@ -174,15 +165,26 @@ mod tests {
             ("OPENAI_API_KEY", "local-key"),
         ]);
 
-        assert_eq!(
-            settings.embedding.provider,
-            EmbeddingProvider::OpenAi
-        );
+        assert_eq!(settings.embedding.provider, EmbeddingProvider::OpenAi);
         assert_eq!(settings.embedding.model, "nomic-embed-text");
         assert_eq!(
             settings.embedding.openai_base_url,
             "http://localhost:11434/v1"
         );
-        assert_eq!(settings.embedding.openai_api_key.as_deref(), Some("local-key"));
+        assert_eq!(
+            settings.embedding.openai_api_key.as_deref(),
+            Some("local-key")
+        );
+    }
+
+    #[test]
+    fn settings_keep_nomic_model_fixed_for_local_provider() {
+        let settings = Settings::from_pairs([
+            ("REPODNA_EMBEDDING_PROVIDER", "nomic"),
+            ("REPODNA_EMBEDDING_MODEL", "text-embedding-3-small"),
+        ]);
+
+        assert_eq!(settings.embedding.provider, EmbeddingProvider::Nomic);
+        assert_eq!(settings.embedding.model, NOMIC_EMBEDDING_MODEL);
     }
 }

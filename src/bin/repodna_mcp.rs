@@ -299,12 +299,7 @@ fn add_function_context(
     function_id: &str,
     summary: &str,
 ) -> Result<AddFunctionContextResponse> {
-    add_function_context_with_embedder(
-        db_path,
-        function_id,
-        summary,
-        embeddings::embed_text,
-    )
+    add_function_context_with_embedder(db_path, function_id, summary, embeddings::embed_text)
 }
 
 fn add_function_context_with_embedder(
