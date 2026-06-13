@@ -92,7 +92,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory. Use a memory-first workflow: before reading files broadly to understand repository code, call search_function_contexts for natural-language, behavioral, or semantic questions. Only call search_functions when you already have one concrete function name, function id, Rust symbol path, or file path hint; do not pass long free-text context into search_functions. If a matching function is found with a useful summary, use that saved context first. If the function exists but its summary is empty or too generic, inspect the source code yourself, then call add_function_context with the exact function_id and a concise high-level summary so future sessions do not rediscover it. If RepoDNA returns no relevant result, fall back to normal code search and reading.".to_string(),
+                "RepoDNA is persistent repository memory. Use a memory-first workflow: before reading files broadly to understand repository code, call search_function_contexts for natural-language, behavioral, or semantic questions. It ranks saved function summaries by embedding similarity when summary embeddings are available, then falls back to lexical matching. Only call search_functions when you already have one concrete function name, function id, Rust symbol path, or file path hint; do not pass long free-text context into search_functions. If a matching function is found with a useful summary, use that saved context first. If the function exists but its summary is empty or too generic, inspect the source code yourself, then call add_function_context with the exact function_id and a concise high-level summary so future sessions do not rediscover it. If RepoDNA returns no relevant result, fall back to normal code search and reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -121,7 +121,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Search saved function context by summary. Use this FIRST for natural-language, behavioral, or semantic questions about what code does, such as 'CLI entrypoint for build/update' or 'starts MCP stdio server'. Parameter query may be a phrase or sentence. This searches functions with non-empty summaries, ranks matches by summary phrase and term overlap, and returns node-shaped JSON results. If this returns no useful result, use search_functions only with a concrete function name/id/file hint, then read source/add_function_context as needed."
+        description = "Search saved function context by summary. Use this FIRST for natural-language, behavioral, or semantic questions about what code does, such as 'CLI entrypoint for build/update' or 'starts MCP stdio server'. Parameter query may be a phrase or sentence. This ranks functions with non-empty summaries by embedding similarity when compatible summary embeddings exist, falls back to summary phrase/term overlap otherwise, and returns node-shaped JSON results. If this returns no useful result, use search_functions only with a concrete function name/id/file hint, then read source/add_function_context as needed."
     )]
     async fn search_function_contexts(
         &self,
@@ -255,10 +255,70 @@ fn search_function_contexts(
     query: &str,
     limit: usize,
 ) -> Result<Vec<FunctionNodeResult>> {
+    search_function_contexts_with_embedder(db_path, query, limit, embeddings::embed_text)
+}
+
+fn search_function_contexts_with_embedder(
+    db_path: &Path,
+    query: &str,
+    limit: usize,
+    embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
+) -> Result<Vec<FunctionNodeResult>> {
     let conn = open_existing_graph_db(db_path)?;
     let terms = query_terms(query);
     let safe_limit = limit.clamp(1, 100);
 
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    if has_function_summary_embeddings(&conn)?
+        && let Ok(query_embedding) = embedder(query.trim())
+    {
+        let semantic_results =
+            search_function_contexts_by_embedding(&conn, &query_embedding, safe_limit)?;
+        if !semantic_results.is_empty() {
+            return Ok(semantic_results);
+        }
+    }
+
+    search_function_contexts_lexical(&conn, query, &terms, safe_limit)
+}
+
+fn has_function_summary_embeddings(conn: &Connection) -> Result<bool> {
+    let table_exists: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = 'function_summary_embeddings'
+        )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(false);
+    }
+
+    let has_rows: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM function_summary_embeddings
+            LIMIT 1
+        )",
+        [],
+        |row| row.get(0),
+    )?;
+
+    Ok(has_rows)
+}
+
+fn search_function_contexts_lexical(
+    conn: &Connection,
+    query: &str,
+    terms: &[String],
+    safe_limit: usize,
+) -> Result<Vec<FunctionNodeResult>> {
     if terms.is_empty() {
         return Ok(Vec::new());
     }
@@ -313,6 +373,96 @@ fn search_function_contexts(
         .take(safe_limit)
         .map(|(_, _, _, item)| item)
         .collect())
+}
+
+fn search_function_contexts_by_embedding(
+    conn: &Connection,
+    query_embedding: &embeddings::EmbeddingResult,
+    safe_limit: usize,
+) -> Result<Vec<FunctionNodeResult>> {
+    if query_embedding.vector.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT
+            COALESCE(nodes.summary, ''),
+            nodes.id,
+            nodes.type,
+            nodes.name,
+            nodes.metadata,
+            function_summary_embeddings.embedding
+         FROM nodes
+         JOIN function_summary_embeddings
+           ON function_summary_embeddings.function_id = nodes.id
+         WHERE nodes.type = 'Function'
+           AND TRIM(COALESCE(nodes.summary, '')) <> ''
+           AND function_summary_embeddings.model = ?1
+           AND function_summary_embeddings.dimensions = ?2",
+    )?;
+
+    let rows = stmt.query_map(
+        params![query_embedding.model, query_embedding.vector.len() as i64],
+        |row| {
+            let item = FunctionNodeResult {
+                summary: row.get(0)?,
+                id: row.get(1)?,
+                r#type: row.get(2)?,
+                name: row.get(3)?,
+                metadata: row.get(4)?,
+            };
+            let embedding: Vec<u8> = row.get(5)?;
+            Ok((item, embedding))
+        },
+    )?;
+
+    let mut scored = Vec::new();
+    for row in rows {
+        let (item, embedding_blob) = row?;
+        let embedding = decode_embedding_blob(&embedding_blob);
+        if embedding.len() != query_embedding.vector.len() {
+            continue;
+        }
+
+        if let Some(score) = cosine_similarity(&query_embedding.vector, &embedding) {
+            scored.push((score, item.name.clone(), item.id.clone(), item));
+        }
+    }
+
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    Ok(scored
+        .into_iter()
+        .take(safe_limit)
+        .map(|(_, _, _, item)| item)
+        .collect())
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        dot += left_value * right_value;
+        left_norm += left_value * left_value;
+        right_norm += right_value * right_value;
+    }
+
+    if left_norm == 0.0 || right_norm == 0.0 {
+        return None;
+    }
+
+    Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
 }
 
 fn query_terms(query: &str) -> Vec<String> {
@@ -476,7 +626,6 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-#[cfg(test)]
 fn decode_embedding_blob(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -694,6 +843,67 @@ mod tests {
     }
 
     #[test]
+    fn search_function_contexts_uses_embeddings_when_terms_do_not_match() -> Result<()> {
+        let db = test_db()?;
+        add_function_context_with_embedder(
+            db.path(),
+            "function:src/main.rs:build_graph",
+            "Initializes handshake transport for tool clients.",
+            fake_semantic_embed,
+        )?;
+        add_function_context_with_embedder(
+            db.path(),
+            "function:src/old.rs:old_graph",
+            "Prunes archived snapshots from obsolete graph state.",
+            fake_semantic_embed,
+        )?;
+
+        let conn = Connection::open(db.path())?;
+        let terms = query_terms("server startup");
+        let lexical_results =
+            search_function_contexts_lexical(&conn, "server startup", &terms, 20)?;
+        assert!(lexical_results.is_empty());
+
+        let semantic_results = search_function_contexts_with_embedder(
+            db.path(),
+            "server startup",
+            20,
+            fake_semantic_embed,
+        )?;
+
+        assert_eq!(semantic_results.len(), 2);
+        assert_eq!(semantic_results[0].id, "function:src/main.rs:build_graph");
+
+        Ok(())
+    }
+
+    #[test]
+    fn search_function_contexts_falls_back_to_lexical_without_embedding_table() -> Result<()> {
+        let db = test_db()?;
+        let conn = Connection::open(db.path())?;
+        conn.execute(
+            "UPDATE nodes SET summary = ?2 WHERE id = ?1",
+            params![
+                "function:src/main.rs:build_graph",
+                "Builds the durable repository graph used by local tools."
+            ],
+        )?;
+        drop(conn);
+
+        let results = search_function_contexts_with_embedder(
+            db.path(),
+            "durable local tools",
+            20,
+            panic_if_called_embed,
+        )?;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "function:src/main.rs:build_graph");
+
+        Ok(())
+    }
+
+    #[test]
     fn add_function_context_rejects_missing_function() -> Result<()> {
         let db = test_db()?;
 
@@ -761,5 +971,24 @@ mod tests {
                 text.bytes().next().unwrap_or_default() as f32,
             ],
         })
+    }
+
+    fn fake_semantic_embed(text: &str) -> Result<embeddings::EmbeddingResult> {
+        assert!(!text.trim().is_empty());
+        let vector = match text {
+            "server startup" => vec![1.0, 0.0],
+            "Initializes handshake transport for tool clients." => vec![0.9, 0.1],
+            "Prunes archived snapshots from obsolete graph state." => vec![0.0, 1.0],
+            _ => vec![0.5, 0.5],
+        };
+
+        Ok(embeddings::EmbeddingResult {
+            model: "test-semantic-model".to_string(),
+            vector,
+        })
+    }
+
+    fn panic_if_called_embed(_text: &str) -> Result<embeddings::EmbeddingResult> {
+        panic!("embedder should not be called")
     }
 }
