@@ -130,6 +130,7 @@ Today RepoDNA focuses on the foundation layer:
 - compute relationships like contains, calls, and main-tree flow
 - calculate ownership and hotspot metadata
 - store durable node context that future sessions can retrieve
+- preserve durable node context across graph rebuilds and flag stale context after source changes
 - expose graph-backed search through local APIs and MCP
 
 This is the groundwork for persistent repository memory.
@@ -201,6 +202,7 @@ codex mcp add repo_dna --env REPODNA_HOME=D:\RepoDNA\.repodna -- cargo run --bin
 Current MCP tools:
 
 - `first_look`: inspect summary coverage and get a bootstrap path for a new or unfamiliar repository. If it returns `bootstrap_needed`, read the recommended nodes first and then call `add_node_context` for the nodes you understand.
+- `context_health`: inspect missing or stale node context after source changes. It compares saved source hashes with current source files, then tells agents which nodes need `add_node_context` or `update_node_description`.
 - `search_nodes`: find graph landing points with the same SQLite FTS/BM25 index used by the graph viewer search. A node can be a file, directory, function, struct, trait/interface, global, or future code entity. Search by partial name, path, node type, symbol, exact node id, or short natural-language terms, then inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` to decide the next read/query action.
 - `add_node_context`: save durable context for any graph node, including files, directories, functions, structs, interfaces, globals, and future code entities.
 - `update_node_description`: replace stale node context and refresh its embedding.

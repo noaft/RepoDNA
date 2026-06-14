@@ -13,8 +13,9 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
 };
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -28,6 +29,12 @@ struct SearchNodesParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct FirstLookParams {
     /// Maximum number of recommended start nodes to return. Defaults to 12 and is clamped to 1..=50.
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ContextHealthParams {
+    /// Maximum number of missing or stale nodes to return. Defaults to 20 and is clamped to 1..=100.
     limit: Option<usize>,
 }
 
@@ -105,6 +112,46 @@ struct FirstLookResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+struct ContextHealthNode {
+    /// Exact graph node id to inspect or pass to update_node_description/add_node_context.
+    node_id: String,
+    /// Node kind, such as File, Directory, Function, Struct, Interface, or GlobalVariable.
+    r#type: String,
+    /// Display and search name for the node.
+    name: String,
+    /// Current durable summary, empty when context_status is missing_summary.
+    summary: String,
+    /// Freshness state for durable memory: fresh, stale, missing_summary, deleted, or unknown.
+    context_status: String,
+    /// Worktree/source change state: unchanged, modified, deleted, or unknown.
+    change_status: String,
+    /// Source path used for freshness checks when RepoDNA can infer one.
+    source_path: Option<String>,
+    /// Why RepoDNA assigned this context_status.
+    stale_reason: String,
+    /// Next action an agent should take to repair or improve this node context.
+    suggested_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+struct ContextHealthResponse {
+    /// Overall memory maintenance mode for the repository graph.
+    mode: String,
+    /// Total graph nodes in the persisted RepoDNA database.
+    total_nodes: i64,
+    /// Nodes whose summary is non-empty.
+    summarized_nodes: i64,
+    /// Nodes reported as stale or deleted.
+    stale_nodes: i64,
+    /// Nodes with no saved summary.
+    missing_summary_nodes: i64,
+    /// Missing or stale nodes that need agent review.
+    nodes: Vec<ContextHealthNode>,
+    /// Next action for the agent after reviewing this health report.
+    suggested_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 struct AddNodeContextResponse {
     /// Exact graph node id whose durable context was added or replaced.
     node_id: String,
@@ -123,6 +170,7 @@ struct UpdateNodeDescriptionResponse {
 #[derive(Clone)]
 struct RepoDnaMcp {
     db_path: PathBuf,
+    repo_path: PathBuf,
     tool_router: ToolRouter<Self>,
 }
 
@@ -131,7 +179,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. On a new or unfamiliar repository, call first_look before broad filesystem exploration. If it returns bootstrap_needed, read the recommended_start_nodes and then call add_node_context for the nodes you understand.\n2. Call search_nodes for targeted repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n3. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n4. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n5. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n6. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n7. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
+                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. On a new or unfamiliar repository, call first_look before broad filesystem exploration. If it returns bootstrap_needed, read the recommended_start_nodes and then call add_node_context for the nodes you understand.\n2. When returning to a repo or after code changes, call context_health. If it reports stale nodes, treat their summaries as orientation only, read the current source/diff, then call update_node_description with the exact node_id.\n3. Call search_nodes for targeted repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n4. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n5. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n6. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n7. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n8. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -140,9 +188,10 @@ impl ServerHandler for RepoDnaMcp {
 
 #[tool_router(router = tool_router)]
 impl RepoDnaMcp {
-    fn new(db_path: PathBuf) -> Self {
+    fn new(db_path: PathBuf, repo_path: PathBuf) -> Self {
         Self {
             db_path,
+            repo_path,
             tool_router: Self::tool_router(),
         }
     }
@@ -155,6 +204,18 @@ impl RepoDnaMcp {
         Parameters(FirstLookParams { limit }): Parameters<FirstLookParams>,
     ) -> Result<Json<FirstLookResponse>, String> {
         first_look(&self.db_path, limit.unwrap_or(12))
+            .map(Json)
+            .map_err(|err| err.to_string())
+    }
+
+    #[tool(
+        description = "Inspect durable context freshness for the repository graph. Use this when returning to a repo, after git changes, or before trusting saved summaries. It reports nodes with missing or stale context by comparing saved source hashes with current source files. RepoDNA does not rewrite summaries automatically: read current source/diff, then call update_node_description or add_node_context with the exact node_id."
+    )]
+    async fn context_health(
+        &self,
+        Parameters(ContextHealthParams { limit }): Parameters<ContextHealthParams>,
+    ) -> Result<Json<ContextHealthResponse>, String> {
+        context_health(&self.db_path, &self.repo_path, limit.unwrap_or(20))
             .map(Json)
             .map_err(|err| err.to_string())
     }
@@ -178,7 +239,7 @@ impl RepoDnaMcp {
         &self,
         Parameters(AddNodeContextParams { node_id, summary }): Parameters<AddNodeContextParams>,
     ) -> Result<Json<AddNodeContextResponse>, String> {
-        add_node_context(&self.db_path, &node_id, &summary)
+        add_node_context_for_repo(&self.db_path, Some(&self.repo_path), &node_id, &summary)
             .map(Json)
             .map_err(|err| err.to_string())
     }
@@ -193,25 +254,34 @@ impl RepoDnaMcp {
             description,
         }): Parameters<UpdateNodeDescriptionParams>,
     ) -> Result<Json<UpdateNodeDescriptionResponse>, String> {
-        update_node_description(&self.db_path, &node_id, &description)
-            .map(Json)
-            .map_err(|err| err.to_string())
+        update_node_description_for_repo(
+            &self.db_path,
+            Some(&self.repo_path),
+            &node_id,
+            &description,
+        )
+        .map(Json)
+        .map_err(|err| err.to_string())
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let repo_path = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
+    let repo_path = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".to_string()));
     let db_path = if let Some(path) = settings::Settings::from_env().db_path {
         path
     } else {
-        let repo = Repository::discover(&repo_path)
-            .with_context(|| format!("failed to discover repository from '{}'", repo_path))?;
+        let repo = Repository::discover(&repo_path).with_context(|| {
+            format!(
+                "failed to discover repository from '{}'",
+                repo_path.display()
+            )
+        })?;
         repodna_paths::validate_storage_configuration(&repo)?;
         repodna_paths::resolve_graph_db_path(&repo)
     };
 
-    let service = RepoDnaMcp::new(db_path).serve(stdio()).await?;
+    let service = RepoDnaMcp::new(db_path, repo_path).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
 }
@@ -447,29 +517,287 @@ fn first_look_reason_for_node(node_id: &str, node_type: &str, name: &str) -> Str
     }
 }
 
-fn add_node_context(
+fn context_health(db_path: &Path, repo_path: &Path, limit: usize) -> Result<ContextHealthResponse> {
+    let conn = open_existing_graph_db(db_path)?;
+    ensure_node_summary_embedding_schema(&conn)?;
+    let (total_nodes, summarized_nodes, missing_summary_nodes): (i64, i64, i64) = conn.query_row(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN TRIM(COALESCE(summary, '')) <> '' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN TRIM(COALESCE(summary, '')) = '' THEN 1 ELSE 0 END), 0)
+         FROM nodes",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    let safe_limit = limit.clamp(1, 100) as usize;
+
+    let mut stmt = conn.prepare(
+        "SELECT
+            n.id,
+            n.type,
+            n.name,
+            COALESCE(n.summary, ''),
+            n.metadata,
+            e.source_path,
+            e.source_hash
+         FROM nodes n
+         LEFT JOIN node_summary_embeddings e ON e.node_id = n.id
+         ORDER BY
+            CASE WHEN TRIM(COALESCE(n.summary, '')) <> '' THEN 0 ELSE 1 END,
+            n.name ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+        ))
+    })?;
+
+    let mut nodes = Vec::new();
+    let mut stale_nodes = 0_i64;
+    for row in rows {
+        let (node_id, node_type, name, summary, metadata, saved_source_path, saved_source_hash) =
+            row?;
+        let inferred_source_path = saved_source_path
+            .clone()
+            .or_else(|| infer_source_path(&name, metadata.as_deref()));
+        let health = classify_context_health(
+            repo_path,
+            summary.trim().is_empty(),
+            inferred_source_path.as_deref(),
+            saved_source_hash.as_deref(),
+        );
+
+        if matches!(
+            health.context_status.as_str(),
+            "stale" | "deleted" | "missing_summary" | "unknown"
+        ) {
+            if matches!(health.context_status.as_str(), "stale" | "deleted") {
+                stale_nodes += 1;
+            }
+            if nodes.len() < safe_limit {
+                nodes.push(ContextHealthNode {
+                    node_id,
+                    r#type: node_type,
+                    name,
+                    summary,
+                    context_status: health.context_status,
+                    change_status: health.change_status,
+                    source_path: inferred_source_path,
+                    stale_reason: health.reason,
+                    suggested_action: health.suggested_action,
+                });
+            }
+        }
+    }
+
+    let mode = if stale_nodes > 0 {
+        "maintenance_needed"
+    } else if missing_summary_nodes > 0 {
+        "bootstrap_needed"
+    } else {
+        "healthy"
+    };
+    let suggested_action = if stale_nodes > 0 {
+        "Review stale nodes using current source or git diff, then call update_node_description with each exact node_id."
+    } else if missing_summary_nodes > 0 {
+        "Read missing-summary nodes that matter, then call add_node_context with each exact node_id."
+    } else {
+        "Use saved summaries normally. Re-run context_health after source changes."
+    }
+    .to_string();
+
+    Ok(ContextHealthResponse {
+        mode: mode.to_string(),
+        total_nodes,
+        summarized_nodes,
+        stale_nodes,
+        missing_summary_nodes,
+        nodes,
+        suggested_action,
+    })
+}
+
+struct ContextClassification {
+    context_status: String,
+    change_status: String,
+    reason: String,
+    suggested_action: String,
+}
+
+fn classify_context_health(
+    repo_path: &Path,
+    missing_summary: bool,
+    source_path: Option<&str>,
+    saved_source_hash: Option<&str>,
+) -> ContextClassification {
+    if missing_summary {
+        return ContextClassification {
+            context_status: "missing_summary".to_string(),
+            change_status: "unknown".to_string(),
+            reason: "This node has no durable summary yet.".to_string(),
+            suggested_action:
+                "Read the current source/docs, then call add_node_context with this node_id."
+                    .to_string(),
+        };
+    }
+
+    let Some(source_path) = source_path else {
+        return ContextClassification {
+            context_status: "unknown".to_string(),
+            change_status: "unknown".to_string(),
+            reason: "RepoDNA could not infer a source path for this summarized node.".to_string(),
+            suggested_action:
+                "Use the saved summary as orientation, inspect the node manually if it matters, then update_node_description if needed."
+                    .to_string(),
+        };
+    };
+
+    let full_path = repo_path.join(source_path);
+    if !full_path.exists() {
+        return ContextClassification {
+            context_status: "deleted".to_string(),
+            change_status: "deleted".to_string(),
+            reason: "The source path used by this summary no longer exists.".to_string(),
+            suggested_action:
+                "Check whether this node was removed or renamed, then update or replace its durable context."
+                    .to_string(),
+        };
+    }
+
+    let current_hash = match source_hash_for_path(&full_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            return ContextClassification {
+                context_status: "unknown".to_string(),
+                change_status: "unknown".to_string(),
+                reason: format!("RepoDNA could not read the current source: {err}"),
+                suggested_action: "Inspect the node manually before trusting the saved summary."
+                    .to_string(),
+            };
+        }
+    };
+
+    match saved_source_hash {
+        Some(saved_hash) if saved_hash == current_hash => ContextClassification {
+            context_status: "fresh".to_string(),
+            change_status: "unchanged".to_string(),
+            reason: "The current source hash matches the hash captured when context was saved."
+                .to_string(),
+            suggested_action: "Use the saved summary normally.".to_string(),
+        },
+        Some(_) => ContextClassification {
+            context_status: "stale".to_string(),
+            change_status: "modified".to_string(),
+            reason: "The current source hash differs from the hash captured when context was saved."
+                .to_string(),
+            suggested_action:
+                "Read the current source or git diff, then call update_node_description with this node_id."
+                    .to_string(),
+        },
+        None => ContextClassification {
+            context_status: "unknown".to_string(),
+            change_status: "unknown".to_string(),
+            reason: "This summary predates source-hash tracking.".to_string(),
+            suggested_action:
+                "Use the saved summary as orientation, inspect the current source, then call update_node_description to refresh tracking."
+                    .to_string(),
+        },
+    }
+}
+
+fn infer_source_path(name: &str, metadata: Option<&str>) -> Option<String> {
+    if let Some(metadata) = metadata {
+        if let Ok(value) = serde_json::from_str::<Value>(metadata) {
+            for key in ["path", "file"] {
+                if let Some(path) = value.get(key).and_then(Value::as_str) {
+                    if !path.trim().is_empty() {
+                        return Some(normalize_repo_path(path));
+                    }
+                }
+            }
+        }
+    }
+
+    if !name.trim().is_empty() {
+        Some(normalize_repo_path(name))
+    } else {
+        None
+    }
+}
+
+fn normalize_repo_path(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+fn source_hash_for_path(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read source path {}", path.display()))?;
+    Ok(format!("{:016x}", fnv1a_64(&bytes)))
+}
+
+fn add_node_context_for_repo(
     db_path: &Path,
+    repo_path: Option<&Path>,
     node_id: &str,
     summary: &str,
 ) -> Result<AddNodeContextResponse> {
-    add_node_context_with_embedder(db_path, node_id, summary, embeddings::embed_text)
+    add_node_context_with_embedder_for_repo(
+        db_path,
+        repo_path,
+        node_id,
+        summary,
+        embeddings::embed_text,
+    )
 }
 
-fn update_node_description(
+fn update_node_description_for_repo(
     db_path: &Path,
+    repo_path: Option<&Path>,
     node_id: &str,
     description: &str,
 ) -> Result<UpdateNodeDescriptionResponse> {
-    update_node_description_with_embedder(db_path, node_id, description, embeddings::embed_text)
+    update_node_description_with_embedder_for_repo(
+        db_path,
+        repo_path,
+        node_id,
+        description,
+        embeddings::embed_text,
+    )
 }
 
+#[cfg(test)]
 fn update_node_description_with_embedder(
     db_path: &Path,
     node_id: &str,
     description: &str,
     embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
 ) -> Result<UpdateNodeDescriptionResponse> {
-    let response = add_node_context_with_embedder(db_path, node_id, description, embedder)?;
+    update_node_description_with_embedder_for_repo(db_path, None, node_id, description, embedder)
+}
+
+fn update_node_description_with_embedder_for_repo(
+    db_path: &Path,
+    repo_path: Option<&Path>,
+    node_id: &str,
+    description: &str,
+    embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
+) -> Result<UpdateNodeDescriptionResponse> {
+    let response = add_node_context_with_embedder_for_repo(
+        db_path,
+        repo_path,
+        node_id,
+        description,
+        embedder,
+    )?;
 
     Ok(UpdateNodeDescriptionResponse {
         node_id: response.node_id,
@@ -477,8 +805,19 @@ fn update_node_description_with_embedder(
     })
 }
 
+#[cfg(test)]
 fn add_node_context_with_embedder(
     db_path: &Path,
+    node_id: &str,
+    summary: &str,
+    embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
+) -> Result<AddNodeContextResponse> {
+    add_node_context_with_embedder_for_repo(db_path, None, node_id, summary, embedder)
+}
+
+fn add_node_context_with_embedder_for_repo(
+    db_path: &Path,
+    repo_path: Option<&Path>,
     node_id: &str,
     summary: &str,
     embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
@@ -495,19 +834,26 @@ fn add_node_context_with_embedder(
     }
 
     ensure_node_summary_embedding_schema(&conn)?;
-    let node_exists: bool = conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1
-            FROM nodes
-            WHERE id = ?1
-        )",
-        [trimmed_id],
-        |row| row.get(0),
-    )?;
+    let node_row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT name, metadata
+             FROM nodes
+             WHERE id = ?1",
+            [trimmed_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
 
-    if !node_exists {
+    let Some((node_name, node_metadata)) = node_row else {
         bail!("node not found for node_id '{}'", trimmed_id);
-    }
+    };
+
+    let source_path = infer_source_path(&node_name, node_metadata.as_deref());
+    let source_hash = repo_path
+        .zip(source_path.as_deref())
+        .and_then(|(repo_path, source_path)| {
+            source_hash_for_path(&repo_path.join(source_path)).ok()
+        });
 
     let embedding = embedder(trimmed_summary).context("failed to embed node summary")?;
     if embedding.vector.is_empty() {
@@ -532,21 +878,27 @@ fn add_node_context_with_embedder(
             dimensions,
             summary_hash,
             embedding,
-            updated_at
+            updated_at,
+            source_path,
+            source_hash
          )
-         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+         VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'), ?6, ?7)
          ON CONFLICT(node_id) DO UPDATE SET
             model = excluded.model,
             dimensions = excluded.dimensions,
             summary_hash = excluded.summary_hash,
             embedding = excluded.embedding,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at,
+            source_path = excluded.source_path,
+            source_hash = excluded.source_hash",
         params![
             trimmed_id,
             embedding.model,
             dimensions as i64,
             summary_hash,
-            embedding_blob
+            embedding_blob,
+            source_path,
+            source_hash
         ],
     )?;
     tx.commit()?;
@@ -565,11 +917,36 @@ fn ensure_node_summary_embedding_schema(conn: &Connection) -> Result<()> {
             dimensions INTEGER NOT NULL,
             summary_hash TEXT NOT NULL,
             embedding BLOB NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            source_path TEXT,
+            source_hash TEXT
         )",
         [],
     )?;
+    add_column_if_missing(conn, "node_summary_embeddings", "source_path", "TEXT")?;
+    add_column_if_missing(conn, "node_summary_embeddings", "source_hash", "TEXT")?;
 
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+    column_type: &str,
+) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == column_name {
+            return Ok(());
+        }
+    }
+
+    conn.execute(
+        &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"),
+        [],
+    )?;
     Ok(())
 }
 
@@ -886,7 +1263,7 @@ mod tests {
 
     #[test]
     fn server_instructions_define_memory_first_decision_policy() {
-        let service = RepoDnaMcp::new(PathBuf::from("graph.db"));
+        let service = RepoDnaMcp::new(PathBuf::from("graph.db"), PathBuf::from("."));
         let info = service.get_info();
         let instructions = info
             .instructions
@@ -972,6 +1349,35 @@ mod tests {
                 |node| node.node_id == "file:README.md" && node.why.contains("project framing")
             )
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn context_health_marks_summarized_changed_file_as_stale() -> Result<()> {
+        let db = test_db()?;
+        let repo_dir = tempfile::tempdir()?;
+        std::fs::write(repo_dir.path().join("README.md"), "old project overview")?;
+
+        add_node_context_with_embedder_for_repo(
+            db.path(),
+            Some(repo_dir.path()),
+            "file:README.md",
+            "README describes the project overview.",
+            fake_embed,
+        )?;
+        std::fs::write(repo_dir.path().join("README.md"), "new project overview")?;
+
+        let response = context_health(db.path(), repo_dir.path(), 10)?;
+
+        let readme = response
+            .nodes
+            .iter()
+            .find(|node| node.node_id == "file:README.md")
+            .expect("changed README should be reported");
+        assert_eq!(readme.context_status, "stale");
+        assert_eq!(readme.change_status, "modified");
+        assert!(readme.suggested_action.contains("update_node_description"));
 
         Ok(())
     }

@@ -230,7 +230,10 @@ impl CommitRepository {
              ON CONFLICT(id) DO UPDATE SET
                  type = excluded.type,
                  name = excluded.name,
-                 summary = excluded.summary,
+                 summary = CASE
+                     WHEN TRIM(excluded.summary) = '' THEN nodes.summary
+                     ELSE excluded.summary
+                 END,
                  metadata = excluded.metadata",
             params![
                 node.id,
@@ -251,7 +254,10 @@ impl CommitRepository {
              ON CONFLICT(id) DO UPDATE SET
                  type = excluded.type,
                  name = excluded.name,
-                 summary = excluded.summary,
+                 summary = CASE
+                     WHEN TRIM(excluded.summary) = '' THEN nodes.summary
+                     ELSE excluded.summary
+                 END,
                  metadata = excluded.metadata",
             params![
                 node.id,
@@ -272,7 +278,10 @@ impl CommitRepository {
              ON CONFLICT(id) DO UPDATE SET
                  type = excluded.type,
                  name = excluded.name,
-                 summary = excluded.summary,
+                 summary = CASE
+                     WHEN TRIM(excluded.summary) = '' THEN nodes.summary
+                     ELSE excluded.summary
+                 END,
                  metadata = excluded.metadata",
             params![
                 node.id,
@@ -2072,6 +2081,37 @@ mod tests {
         assert_eq!(second.commit_nodes_inserted, 0);
         assert_eq!(commit_count, 0);
         assert_eq!(authored_by_count, 0);
+    }
+
+    #[test]
+    fn build_graph_preserves_existing_node_summaries() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["initial"]);
+        std::fs::write(temp_dir.path().join("README.md"), "Repo overview\n")
+            .expect("readme should be written");
+
+        let first = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("first build should succeed");
+        let file_id = FileNode::from_path("README.md").id;
+        let db = Connection::open(&first.db_path).expect("db should open");
+        db.execute(
+            "UPDATE nodes SET summary = ?1 WHERE id = ?2",
+            params!["Durable README context.", file_id],
+        )
+        .expect("summary update should succeed");
+        drop(db);
+
+        let second = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("second build should succeed");
+        let db = Connection::open(&second.db_path).expect("db should open");
+        let stored_summary: String = db
+            .query_row(
+                "SELECT summary FROM nodes WHERE id = ?1",
+                [FileNode::from_path("README.md").id],
+                |row| row.get(0),
+            )
+            .expect("summary query should succeed");
+
+        assert_eq!(stored_summary, "Durable README context.");
     }
 
     #[test]
