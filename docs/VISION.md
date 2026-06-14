@@ -17,6 +17,31 @@ Memory is still the bottleneck.
 
 RepoDNA exists to fix that.
 
+## Context Engineering
+
+RepoDNA is a context engineering project.
+
+The problem is not that Codex, Claude, or other coding tools cannot reason.
+The problem is that every new session starts too close to zero. The model has
+to reopen files, rebuild a mental map, rediscover why functions exist, and
+guess which details from previous work still matter.
+
+That repeated context rebuild is expensive in tokens, time, and quality. It
+also makes agents act strangely: they may write code that is locally plausible
+but disconnected from the repository's accumulated knowledge.
+
+RepoDNA's job is to make useful context durable:
+
+- what the source tree contains
+- how code entities relate
+- what changed recently
+- which files and functions are risky
+- what earlier sessions already learned
+- what evidence supports a saved explanation
+
+If context can be stored, retrieved, corrected, and reused, then coding tools
+can spend more effort changing code and less effort rediscovering it.
+
 ## The Core Belief
 
 The future of software tooling is not just better generation.
@@ -62,6 +87,23 @@ The goal is not to create yet another assistant.
 
 The goal is to make every assistant less forgetful.
 
+## Dogfood Principle
+
+RepoDNA should be built with RepoDNA.
+
+The first serious user is this repository itself. If a new development session
+on RepoDNA still has to rediscover the same ingestion logic, MCP behavior,
+storage rules, and product intent from scratch, the product is not working yet.
+
+Every investigation should be an opportunity to improve durable memory:
+
+- find the relevant node
+- inspect the source when memory is missing
+- save a concise explanation back to the graph
+- let the next session retrieve it before reading broadly
+
+This loop is the smallest proof that RepoDNA matters.
+
 ## The Job To Be Done
 
 When a developer or coding agent returns to a repo, RepoDNA should help them recover context instead of rebuilding context.
@@ -97,6 +139,10 @@ In that model:
 - the repository is the source of truth
 - RepoDNA is the memory engine
 - tools become clients of durable context
+
+The first client surface is MCP because it gives tools like Codex and Claude a
+common way to ask for repository memory without each one needing a bespoke
+integration.
 
 ## North Star Experience
 
@@ -177,8 +223,10 @@ The immediate mission is practical:
 
 1. Build a reliable local graph from repository history and structure.
 2. Persist it in a form tools can reuse across sessions.
-3. Expose it through simple retrieval surfaces like MCP.
-4. Make context recovery cheaper than context rediscovery.
+3. Treat every source file and code entity as a meaningful graph node.
+4. Expose that graph through simple retrieval surfaces like MCP.
+5. Let tools save useful context back onto graph nodes.
+6. Make context recovery cheaper than context rediscovery.
 
 This is the shortest path to proving the larger thesis.
 

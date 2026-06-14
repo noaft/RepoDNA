@@ -6,6 +6,10 @@
 
 RepoDNA gives coding tools a long-term memory.
 
+It is built for the tools developers already use: Codex, Claude, editors,
+review agents, and future automation. The goal is shared context, not another
+chat surface.
+
 Most code tools are brilliant inside the current window and forgetful the moment the session ends. They can read files, patch code, and answer local questions, but they repeatedly lose the deeper context:
 
 - Why does this function exist?
@@ -15,6 +19,10 @@ Most code tools are brilliant inside the current window and forgetful the moment
 - What did the last agent already discover before the session died?
 
 RepoDNA turns the current repository structure and saved tool knowledge into a persistent graph so developers and coding agents can recover context instead of recomputing it from scratch every time.
+
+This is context engineering for repositories: build the map once, keep it
+fresh as the code changes, and let every session start from durable memory
+instead of a blank prompt window.
 
 ## The Story :repeat:
 
@@ -61,6 +69,10 @@ Think of it as:
 RepoDNA is not trying to replace your coding assistant.
 
 RepoDNA is the memory system underneath the assistant.
+
+Codex should be able to ask RepoDNA what the repo already knows before it
+spends tokens reading the same files again. Claude should be able to use the
+same graph. A future editor plugin should be able to use it too.
 
 ## Why It Matters :zap:
 
@@ -114,12 +126,28 @@ Developers and coding agents
 Today RepoDNA focuses on the foundation layer:
 
 - ingest the current repository code into a local SQLite-backed graph
-- extract repository nodes such as files, directories, and functions
+- extract repository nodes such as files, directories, functions, structs, traits, and globals
 - compute relationships like contains, calls, and main-tree flow
 - calculate ownership and hotspot metadata
-- expose graph-backed search through an MCP server
+- store durable function context that future sessions can retrieve
+- expose graph-backed search through local APIs and MCP
 
 This is the groundwork for persistent repository memory.
+
+## Roadmap :compass:
+
+### From Dogfood To Shared Memory
+
+The near-term roadmap is intentionally practical:
+
+1. **Dogfood Memory Loop** - use RepoDNA while building RepoDNA so each session has less rediscovery than the last.
+2. **Whole Source Graph** - make every file, directory, and code symbol meaningful in one graph.
+3. **MCP As The Product Surface** - let Codex, Claude, and other coding tools consume the same local memory.
+4. **Durable Context Engineering** - let agents save what they learned back onto graph nodes.
+5. **Change-Aware Planning** - combine git diff, graph relationships, hotspots, and saved context before edits.
+6. **Team Memory Layer** - keep local-first workflows while allowing intentional shared memory.
+
+See [docs/ROADMAP.md](/abs/path/d:/Git/RepoDNA/docs/ROADMAP.md:1) for the full plan.
 
 ## Environment :gear:
 
@@ -213,6 +241,7 @@ They should be able to recover:
 - who changed it
 - what is risky
 - what the last useful line of investigation already discovered
+- what a previous Codex or Claude session already learned
 
 RepoDNA helps turn code understanding from a per-session activity into a persistent asset.
 

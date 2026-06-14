@@ -1,430 +1,184 @@
 # Roadmap
 
-## Phase 0 - Foundation
+RepoDNA is a context engineering system for coding tools.
+
+The product is not another assistant. The product is durable repository memory that Codex, Claude, editors, review tools, and future agents can all query through local APIs and MCP.
+
+The roadmap is organized around one practical test:
+
+> Can a new session recover useful repo context faster than rebuilding it from scratch?
+
+## Now - Dogfood Memory Loop
 
 ### Goal
 
-Turn a repository into structured data.
+Make RepoDNA useful for its own development.
 
-No AI.
-No MCP.
-No Claude.
+Every RepoDNA session should start with less rediscovery than the previous one. When an agent investigates a function, file, or subsystem, the useful result should become durable graph context that the next session can retrieve.
 
-Input:
+### Build
 
-```text
-Git Repository
-```
+- reliable `build` and `update` flows for the current worktree
+- full source-tree ingestion: every indexed file becomes a `File` node
+- Rust semantic extraction for functions, structs, traits, globals, calls, main flow
+- saved function context through MCP
+- graph API and HTML viewer for manual inspection
 
-Output:
+### Success Criteria
 
-```text
-Knowledge Store
-```
+- Codex can use RepoDNA memory before broad filesystem search
+- a saved function summary is retrievable in a later session
+- non-Rust files appear as meaningful `File` nodes in the graph
+- `cargo check` remains the baseline verification command
 
-### Features
-
-#### Git Scanner
-
-Collect:
-
-```text
-Commit
-Author
-Date
-Message
-Diff
-```
-
-Example:
-
-```json
-{
-  "commit": "abc123",
-  "author": "John",
-  "message": "Fix OOM issue",
-  "files": ["scheduler.rs"]
-}
-```
-
-#### AST Scanner
-
-Collect:
-
-```text
-Module
-Class
-Function
-Imports
-```
-
-Example:
-
-```json
-{
-  "function": "allocate",
-  "file": "cache.rs"
-}
-```
-
-#### Dependency Scanner
-
-Generate:
-
-```text
-Module A -> Module B
-```
-
-#### Call Graph
-
-Generate:
-
-```text
-allocate()
-    ↓
-get_free_block()
-    ↓
-evict()
-```
-
-### Deliverable
-
-```bash
-repodna build .
-```
-
-Produces:
-
-```text
-.repodna/
-commits.db
-functions.db
-dependencies.db
-```
-
----
-
-## Phase 1 - Repository Graph
+## Next - Whole Source Graph
 
 ### Goal
 
-Build the first Knowledge Graph.
+Treat every source node as meaningful.
 
-Entities:
+RepoDNA should not feel like a narrow function index. Files, directories, functions, symbols, and relationships should form one coherent source graph.
 
-```text
-Repository
-Module
-File
-Function
-Class
-Commit
-Author
-```
+### Build
 
-Relationships:
+- stable node ids for files, directories, and code symbols
+- source-tree relationships such as `CONTAINS`
+- code relationships such as `CALLS`, `MAIN_TREE`, and `MAIN_FLOW`
+- graph queries that work across node types, not only functions
+- viewer defaults that show the source graph directly
 
-```text
-calls
-imports
-modifies
-introduced_in
-depends_on
-owns
-```
+### Success Criteria
 
-Deliverable:
+- a user can search for a file, function, directory, or symbol and land on the right node
+- the graph can answer "what is near this node?"
+- non-semantic files remain simple `File` nodes instead of fake parsed entities
+- function-level memory keeps working while broader graph memory expands
 
-```bash
-repodna graph
-```
-
----
-
-## Phase 2 - Repository Search
+## Next - MCP As The Product Surface
 
 ### Goal
 
-Answer questions using the graph.
+Make RepoDNA easy for coding tools to consume.
 
-No AI.
+MCP is the first real product surface because it lets Codex, Claude, and other tools share the same repository memory layer without custom integrations.
 
-Example:
+### Build
 
-```bash
-repodna query "allocate"
-```
+- keep existing function memory tools stable
+- add graph-wide MCP tools such as:
+  - `search_nodes`
+  - `search_files`
+  - `get_node_neighbors`
+  - `get_node_context`
+  - `add_node_context`
+- keep MCP startup quiet and resilient on stdio
+- keep outputs schema-safe with object root schemas
 
-Output:
+### Success Criteria
 
-```text
-Function: allocate
+- a coding agent can ask RepoDNA for context before reading files broadly
+- MCP can retrieve file, directory, and function nodes
+- tool results are small enough to be useful inside model context
+- failures are actionable rather than looking like handshake bugs
 
-Introduced:
-commit abc123
-
-Calls:
-- get_free_block
-- evict
-
-Modified:
-17 times
-```
-
-Deliverable:
-
-```bash
-repodna inspect allocate
-```
-
----
-
-## Phase 3 - Historical Intelligence
+## Next - Durable Context Engineering
 
 ### Goal
 
-Start understanding history.
+Let agents write down what they learned.
 
-This is where LLM usage begins.
+RepoDNA should preserve more than raw graph structure. It should store durable explanations, summaries, observations, and evidence that survive session boundaries.
 
-Commit:
+### Build
 
-```text
-Fix OOM issue
-```
+- node-attached summaries and descriptions
+- provenance for saved context: source node, author/tool, timestamp, evidence
+- update flows for stale context
+- retrieval ranking that combines graph proximity, saved summaries, and lexical/embedding search
 
-LLM output:
+### Success Criteria
 
-```json
-{
-  "type": "bug_fix",
-  "category": "memory"
-}
-```
+- useful investigation results can be saved without editing prompt files
+- future sessions can distinguish durable context from raw metadata
+- stale or wrong context can be corrected through MCP
+- saved context reduces repeated token spend in real dogfood sessions
 
-Commit:
-
-```text
-Replace FIFO with LRU
-```
-
-LLM output:
-
-```json
-{
-  "type": "architecture_change",
-  "from": "FIFO",
-  "to": "LRU"
-}
-```
-
-New entities:
-
-```text
-Decision
-Incident
-Refactor
-Bug Fix
-Feature
-```
-
-Deliverable:
-
-```bash
-repodna enrich
-```
-
-Produces:
-
-```text
-decisions.db
-incidents.db
-```
-
----
-
-## Phase 4 - Architecture Intelligence
+## Later - Change-Aware Planning
 
 ### Goal
 
-Understand the repository like a Staff Engineer.
+Help agents plan changes with repo memory.
 
-Module:
+Before modifying code, an agent should be able to ask RepoDNA what matters around the intended change: related files, hotspots, ownership, previous context, and likely risk.
 
-```text
-cache
-```
+### Build
 
-LLM output:
+- git diff ingestion for working changes
+- changed-node detection
+- nearby context packs for affected nodes
+- risk hints based on hotspots, ownership, and graph relationships
+- plan-oriented MCP tools
 
-```json
-{
-  "purpose": "GPU memory management",
-  "criticality": "high"
-}
-```
+### Success Criteria
 
-Module:
+- given a diff, RepoDNA can identify impacted graph nodes
+- agents can request "what should I know before changing this?"
+- generated plans cite graph evidence instead of relying only on prompt memory
 
-```text
-scheduler
-```
-
-LLM output:
-
-```json
-{
-  "purpose": "request orchestration"
-}
-```
-
-Deliverable:
-
-```bash
-repodna architecture
-```
-
-Output:
-
-```text
-Cache Layer
-Scheduler Layer
-Execution Layer
-Storage Layer
-```
-
----
-
-## Phase 5 - MCP Server
+## Later - Team Memory Layer
 
 ### Goal
 
-Make it usable by agents.
+Make repository memory useful beyond one machine and one session.
 
-```bash
-repodna serve
-```
+RepoDNA should stay local-first, but teams should be able to share memory intentionally when they want to.
 
-Expose tools:
+### Build
 
-```text
-get_function_info
-get_commit_history
-get_decision_history
-get_module_summary
-get_architecture_summary
-```
+- predictable storage with `REPODNA_HOME` and `REPODNA_DB_PATH`
+- export/import of graph memory
+- optional sync strategy
+- repo-scoped memory boundaries
+- documentation for Codex, Claude, and local workflows
 
-Example:
+### Success Criteria
 
-```text
-User: Optimize cache
-Claude: RepoDNA says cache is high risk
-```
+- multiple tools can point at the same repository memory
+- storage behavior is predictable across CLI, API, and MCP
+- shared memory does not require a cloud dependency by default
 
-Result: smarter code changes.
+## Long-Term Direction
 
----
+RepoDNA can eventually ingest more than git and source files:
 
-## Phase 6 - Agent Intelligence Layer
+- pull requests
+- issues
+- ADRs
+- release notes
+- incident reports
+- docs and design notes
+- team knowledge systems
 
-### Goal
+But the order matters.
 
-Let agents reason using Repository Memory.
-
-New tools:
-
-```text
-why_exists()
-refactor_risk()
-architectural_decisions()
-incident_history()
-ownership_info()
-```
-
-Before changing code:
-
-```text
-Why was this implemented?
-```
-
-RepoDNA answers with context.
-
----
-
-## Long-Term Vision (2-3 years)
-
-RepoDNA will not only read:
-
-```text
-Git
-```
-
-It will read:
-
-```text
-Git
-PR
-Issue
-ADR
-Notion
-Slack
-Linear
-Jira
-```
-
-And generate:
-
-```text
-Repository Knowledge Graph
-```
-
-Positioning:
-
-```text
-GitHub Copilot -> reads code
-RepoDNA -> understands the organization behind the code
-```
-
----
+The first durable win is local repository memory that helps coding tools stop paying the same context tax every session.
 
 ## True MVP
 
-Skip 90% of the ideas above and focus on one milestone:
+The true MVP is not a large feature list.
 
-```bash
-repodna build .
-```
-
-Generate:
+It is this loop:
 
 ```text
-Commit Graph
-Call Graph
-Dependency Graph
-Ownership Graph
+Build graph
+  ->
+Use Codex or Claude through MCP
+  ->
+Save useful context to graph
+  ->
+Start a new session
+  ->
+Recover that context without rediscovery
 ```
 
-And run:
-
-```bash
-repodna inspect cache
-```
-
-To answer:
-
-```text
-Module: cache
-
-Functions: 42
-
-Modified: 317 times
-
-Top Contributor: Alice
-
-Dependencies:
-- memory
-- scheduler
-
-Risk Level: High
-```
+If that loop works, RepoDNA is doing its job.
