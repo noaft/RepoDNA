@@ -200,6 +200,7 @@ codex mcp add repo_dna --env REPODNA_HOME=D:\RepoDNA\.repodna -- cargo run --bin
 
 Current MCP tools:
 
+- `first_look`: inspect summary coverage and get a bootstrap path for a new or unfamiliar repository. If it returns `bootstrap_needed`, read the recommended nodes first and then call `add_node_context` for the nodes you understand.
 - `search_nodes`: find graph landing points with the same SQLite FTS/BM25 index used by the graph viewer search. A node can be a file, directory, function, struct, trait/interface, global, or future code entity. Search by partial name, path, node type, symbol, exact node id, or short natural-language terms, then inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` to decide the next read/query action.
 - `add_node_context`: save durable context for any graph node, including files, directories, functions, structs, interfaces, globals, and future code entities.
 - `update_node_description`: replace stale node context and refresh its embedding.

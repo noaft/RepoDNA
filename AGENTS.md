@@ -108,13 +108,14 @@ The MCP server must be easy to launch and resilient in local environments.
 When an agent needs to understand repository code, prefer RepoDNA memory before broad filesystem search:
 
 1. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first.
-2. Call `search_nodes` for repository discovery. It uses the same SQLite FTS/BM25 node index as the graph viewer search and accepts concrete hints or short search terms: node name, type, id, symbol, file path, directory, or source-tree hint.
-3. Treat results as graph landing points: inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` before deciding what to read next.
-4. Remember that a node can be a `File`, `Directory`, `Function`, `Struct`, `Interface`, `GlobalVariable`, or future code entity.
-5. If a relevant result has a useful non-empty `summary`, use that saved context first.
-6. If a relevant node exists but `summary` is empty, stale, or too generic, inspect the source code or docs yourself.
-7. After understanding the node, call `add_node_context` with the exact `node_id` and a concise high-level summary of what the node is for.
-8. If RepoDNA has no relevant result, fall back to normal code search and reading.
+2. On a new or unfamiliar repository, call `first_look`. If it returns `bootstrap_needed`, read its recommended nodes and then call `add_node_context` for each node you genuinely understand.
+3. Call `search_nodes` for targeted repository discovery. It uses the same SQLite FTS/BM25 node index as the graph viewer search and accepts concrete hints or short search terms: node name, type, id, symbol, file path, directory, or source-tree hint.
+4. Treat results as graph landing points: inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` before deciding what to read next.
+5. Remember that a node can be a `File`, `Directory`, `Function`, `Struct`, `Interface`, `GlobalVariable`, or future code entity.
+6. If a relevant result has a useful non-empty `summary`, use that saved context first.
+7. If a relevant node exists but `summary` is empty, stale, or too generic, inspect the source code or docs yourself.
+8. After understanding the node, call `add_node_context` with the exact `node_id` and a concise high-level summary of what the node is for.
+9. If RepoDNA has no relevant result, fall back to normal code search and reading.
 
 This loop is core product behavior: every fresh investigation should improve durable repository memory for the next session.
 

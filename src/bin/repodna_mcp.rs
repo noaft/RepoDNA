@@ -26,6 +26,12 @@ struct SearchNodesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct FirstLookParams {
+    /// Maximum number of recommended start nodes to return. Defaults to 12 and is clamped to 1..=50.
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AddNodeContextParams {
     /// Exact graph node id returned by search_nodes. This can identify a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity.
     node_id: String,
@@ -65,6 +71,40 @@ struct SearchNodesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+struct FirstLookNode {
+    /// Exact graph node id to inspect and later pass to add_node_context.
+    node_id: String,
+    /// Node kind, such as File, Directory, Function, Struct, Interface, or GlobalVariable.
+    r#type: String,
+    /// Display and search name for the node.
+    name: String,
+    /// Existing durable summary. It is usually empty in bootstrap mode.
+    summary: String,
+    /// Optional JSON metadata string with extra facts such as file path or source location.
+    metadata: Option<String>,
+    /// Why RepoDNA recommends reading this node during first-look/bootstrap work.
+    why: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+struct FirstLookResponse {
+    /// Bootstrap state for this repository graph. "bootstrap_needed" means important context is sparse; "memory_available" means saved summaries already cover a meaningful part of the graph; "empty_graph" means the graph has no nodes.
+    mode: String,
+    /// Human-readable reason for the selected mode.
+    reason: String,
+    /// Total graph nodes in the persisted RepoDNA database.
+    total_nodes: i64,
+    /// Nodes whose summary is non-empty.
+    summarized_nodes: i64,
+    /// summarized_nodes / total_nodes as a 0.0..1.0 ratio.
+    summary_coverage: f64,
+    /// Nodes an agent should inspect first, then summarize back into RepoDNA with add_node_context.
+    recommended_start_nodes: Vec<FirstLookNode>,
+    /// Next action for the agent after reading recommended_start_nodes.
+    suggested_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 struct AddNodeContextResponse {
     /// Exact graph node id whose durable context was added or replaced.
     node_id: String,
@@ -91,7 +131,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. Call search_nodes first for repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n2. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n3. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n4. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n5. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n6. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
+                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. On a new or unfamiliar repository, call first_look before broad filesystem exploration. If it returns bootstrap_needed, read the recommended_start_nodes and then call add_node_context for the nodes you understand.\n2. Call search_nodes for targeted repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n3. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n4. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n5. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n6. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n7. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -105,6 +145,18 @@ impl RepoDnaMcp {
             db_path,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(
+        description = "Get a first-look bootstrap guide for an unfamiliar repository graph. Use this before broad filesystem exploration when entering a repo or when search_nodes has little saved summary context. It reports summary coverage and recommends important nodes to read first; after reading them, call add_node_context with each exact node_id so future sessions inherit the context."
+    )]
+    async fn first_look(
+        &self,
+        Parameters(FirstLookParams { limit }): Parameters<FirstLookParams>,
+    ) -> Result<Json<FirstLookResponse>, String> {
+        first_look(&self.db_path, limit.unwrap_or(12))
+            .map(Json)
+            .map_err(|err| err.to_string())
     }
 
     #[tool(
@@ -244,6 +296,155 @@ fn ensure_nodes_fts_index(conn: &Connection) -> Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn first_look(db_path: &Path, limit: usize) -> Result<FirstLookResponse> {
+    let conn = open_existing_graph_db(db_path)?;
+    let (total_nodes, summarized_nodes): (i64, i64) = conn.query_row(
+        "SELECT
+            COUNT(*),
+            COALESCE(SUM(CASE WHEN TRIM(COALESCE(summary, '')) <> '' THEN 1 ELSE 0 END), 0)
+         FROM nodes",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+
+    let summary_coverage = if total_nodes == 0 {
+        0.0
+    } else {
+        summarized_nodes as f64 / total_nodes as f64
+    };
+    let mode = if total_nodes == 0 {
+        "empty_graph"
+    } else if summary_coverage < 0.2 {
+        "bootstrap_needed"
+    } else {
+        "memory_available"
+    };
+    let reason = match mode {
+        "empty_graph" => {
+            "The graph database has no nodes yet. Run `cargo run -- build <repo>` first."
+        }
+        "bootstrap_needed" => {
+            "The graph exists, but durable node summaries are sparse. The first agent should read important nodes and save context for future sessions."
+        }
+        _ => "RepoDNA already has a meaningful amount of saved node context. Use summaries first, then search/read as needed.",
+    }
+    .to_string();
+
+    let safe_limit = limit.clamp(1, 50) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT
+            id,
+            type,
+            name,
+            COALESCE(summary, ''),
+            metadata
+         FROM nodes
+         WHERE TRIM(COALESCE(summary, '')) = ''
+         ORDER BY
+            CASE
+                WHEN LOWER(name) = 'agents.md' OR LOWER(name) LIKE '%/agents.md' THEN 0
+                WHEN LOWER(name) = 'readme.md' OR LOWER(name) LIKE '%/readme.md' THEN 1
+                WHEN LOWER(name) = 'cargo.toml' OR LOWER(name) LIKE '%/cargo.toml' THEN 2
+                WHEN LOWER(name) = 'package.json' OR LOWER(name) LIKE '%/package.json' THEN 2
+                WHEN LOWER(name) = 'src/main.rs' OR LOWER(name) LIKE '%/src/main.rs' THEN 3
+                WHEN LOWER(name) LIKE '%mcp%' THEN 4
+                WHEN LOWER(name) LIKE '%api%' THEN 5
+                WHEN LOWER(name) LIKE '%ingestion%' THEN 6
+                WHEN LOWER(name) LIKE '%setting%' OR LOWER(name) LIKE '%config%' THEN 7
+                WHEN type = 'File' THEN 8
+                WHEN type = 'Directory' THEN 9
+                WHEN type = 'Function' THEN 10
+                ELSE 11
+            END,
+            name ASC
+         LIMIT ?1",
+    )?;
+
+    let rows = stmt.query_map([safe_limit], |row| {
+        let node_id: String = row.get(0)?;
+        let r#type: String = row.get(1)?;
+        let name: String = row.get(2)?;
+        let summary: String = row.get(3)?;
+        let metadata: Option<String> = row.get(4)?;
+        let why = first_look_reason_for_node(&node_id, &r#type, &name);
+
+        Ok(FirstLookNode {
+            node_id,
+            r#type,
+            name,
+            summary,
+            metadata,
+            why,
+        })
+    })?;
+
+    let mut recommended_start_nodes = Vec::new();
+    for row in rows {
+        recommended_start_nodes.push(row?);
+    }
+
+    let suggested_action = if mode == "empty_graph" {
+        "Build the graph first, then call first_look again.".to_string()
+    } else if mode == "bootstrap_needed" {
+        "Read the recommended_start_nodes in order. For each node you genuinely understand, call add_node_context with that exact node_id and a concise summary."
+            .to_string()
+    } else {
+        "Use existing summaries first. When you inspect a stale or empty node, call add_node_context or update_node_description with the exact node_id."
+            .to_string()
+    };
+
+    Ok(FirstLookResponse {
+        mode: mode.to_string(),
+        reason,
+        total_nodes,
+        summarized_nodes,
+        summary_coverage,
+        recommended_start_nodes,
+        suggested_action,
+    })
+}
+
+fn first_look_reason_for_node(node_id: &str, node_type: &str, name: &str) -> String {
+    let lower_name = name.to_ascii_lowercase();
+    let lower_id = node_id.to_ascii_lowercase();
+
+    if lower_name == "agents.md" || lower_name.ends_with("/agents.md") {
+        "Agent operating rules usually live here; read this before changing behavior.".to_string()
+    } else if lower_name == "readme.md" || lower_name.ends_with("/readme.md") {
+        "README usually carries project framing, setup, and operator-facing workflow.".to_string()
+    } else if lower_name == "cargo.toml"
+        || lower_name.ends_with("/cargo.toml")
+        || lower_name == "package.json"
+        || lower_name.ends_with("/package.json")
+    {
+        "Manifest files reveal the project shape, dependencies, and runnable surfaces.".to_string()
+    } else if lower_name == "src/main.rs" || lower_name.ends_with("/src/main.rs") {
+        "Main source entrypoint often wires the CLI or runtime workflow.".to_string()
+    } else if lower_name.contains("mcp") || lower_id.contains("mcp") {
+        "MCP-related nodes define how other tools recover and write repository memory.".to_string()
+    } else if lower_name.contains("api") || lower_id.contains("api") {
+        "API nodes usually expose graph memory to local tooling.".to_string()
+    } else if lower_name.contains("ingestion") || lower_id.contains("ingestion") {
+        "Ingestion nodes usually build the graph and decide what memory exists.".to_string()
+    } else if lower_name.contains("setting")
+        || lower_name.contains("config")
+        || lower_id.contains("setting")
+        || lower_id.contains("config")
+    {
+        "Settings/config nodes control local behavior and launch reliability.".to_string()
+    } else if node_type == "File" {
+        "File nodes are good bootstrap anchors because they can describe a whole source or docs surface.".to_string()
+    } else if node_type == "Directory" {
+        "Directory nodes help map a source area before drilling into specific symbols.".to_string()
+    } else if node_type == "Function" {
+        "Function nodes are useful after higher-level file context points to specific behavior."
+            .to_string()
+    } else {
+        "Unsummarized graph node; inspect it if it looks relevant, then save durable context."
+            .to_string()
+    }
 }
 
 fn add_node_context(
@@ -693,12 +894,15 @@ mod tests {
 
         for phrase in [
             "Before reading files broadly",
+            "first_look",
+            "bootstrap_needed",
             "search_nodes",
             "A node is",
             "File",
             "Directory",
             "Function",
             "BM25",
+            "add_node_context",
             "fallback",
         ] {
             assert!(
@@ -748,6 +952,26 @@ mod tests {
         assert_eq!(results[0].id, "file:src/api/mod.rs");
         assert!(results[0].relevance > 0.0);
         assert!(results[0].bm25_score.is_finite());
+
+        Ok(())
+    }
+
+    #[test]
+    fn first_look_reports_bootstrap_needed_for_empty_context() -> Result<()> {
+        let db = test_db()?;
+
+        let response = first_look(db.path(), 10)?;
+
+        assert_eq!(response.mode, "bootstrap_needed");
+        assert_eq!(response.total_nodes, 4);
+        assert_eq!(response.summarized_nodes, 0);
+        assert_eq!(response.summary_coverage, 0.0);
+        assert!(response.suggested_action.contains("add_node_context"));
+        assert!(
+            response.recommended_start_nodes.iter().any(
+                |node| node.node_id == "file:README.md" && node.why.contains("project framing")
+            )
+        );
 
         Ok(())
     }
