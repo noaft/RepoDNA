@@ -403,13 +403,8 @@
       <div class="controls">
         <input id="apiBase" value="http://127.0.0.1:3000" aria-label="API base URL" />
         <input id="nodeSearch" placeholder="Search node by name or id" aria-label="Node search" />
-        <button class="btn active" id="fullGraphModeBtn">Full Graph</button>
-        <button class="btn" id="mainTreeModeBtn">Main Tree</button>
-        <button class="btn" id="toggleLifecycleBtn">Show Commit+Author</button>
-        <button class="btn" id="toggleNonCodeBtn">Show Non-Code Files</button>
         <button class="btn" id="searchBtn">Search</button>
         <button class="btn primary" id="loadBtn">Load Graph</button>
-        <button class="btn active" id="mode2d">2D</button>
       </div>
     </div>
 
@@ -422,7 +417,6 @@
       <aside class="panel side">
         <h2>Selection</h2>
         <div class="legend">
-          <span class="chip" id="modeLegendChip">Mode: Full Graph</span>
           <span class="chip">CodeGraph: Commit/Author hidden</span>
           <span class="chip">Directory</span>
           <span class="chip">File</span>
@@ -433,7 +427,6 @@
           <span class="chip">File heat: High=large hot</span>
           <span class="chip">Function heat: Low=small cool</span>
           <span class="chip">Function heat: High=large hot</span>
-          <span class="chip">2D: readable labels</span>
         </div>
         <div class="kpi"><strong>Nodes:</strong> <span id="nodeCount">0</span></div>
         <div class="kpi"><strong>Edges:</strong> <span id="edgeCount">0</span></div>
@@ -469,24 +462,10 @@
 
   <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
   <script>
-    const HIDDEN_NON_CODE_EXTENSIONS = new Set([
-      ".md",
-      ".txt",
-      ".lock",
-      ".png",
-      ".jpg",
-      ".jpeg",
-      ".svg",
-      ".gif"
-    ]);
-
     const state = {
       cy: null,
       nodes: [],
       edges: [],
-      graphMode: "full",
-      showNonCodeFiles: false,
-      showLifecycleNodes: false,
       functionCommitChanges: [],
       selectedFunctionCommitIndex: 0,
       isDiffModalOpen: false
@@ -509,12 +488,7 @@
     const modalPrevCommitBtnEl = document.getElementById("modalPrevCommitBtn");
     const modalNextCommitBtnEl = document.getElementById("modalNextCommitBtn");
     const searchInputEl = document.getElementById("nodeSearch");
-    const fullGraphModeBtnEl = document.getElementById("fullGraphModeBtn");
-    const mainTreeModeBtnEl = document.getElementById("mainTreeModeBtn");
-    const toggleLifecycleBtnEl = document.getElementById("toggleLifecycleBtn");
-    const toggleNonCodeBtnEl = document.getElementById("toggleNonCodeBtn");
     const hoverTipEl = document.getElementById("hoverTip");
-    const modeLegendChipEl = document.getElementById("modeLegendChip");
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -546,102 +520,29 @@
       return parts.slice(0, -1).join("/");
     }
 
-    function getFileExtension(pathValue) {
-      const name = basename(pathValue).toLowerCase();
-      const lastDot = name.lastIndexOf(".");
-      if (lastDot <= 0) {
-        return "";
-      }
-      return name.slice(lastDot);
-    }
-
-    function isNonCodeFileNode(node) {
-      if (String(node.type || "").toLowerCase() !== "file") {
-        return false;
-      }
-      const extension = getFileExtension(node.name || node.id || "");
-      return HIDDEN_NON_CODE_EXTENSIONS.has(extension);
-    }
-
     function isLifecycleNode(node) {
       const normalizedType = String(node.type || "").toLowerCase();
       return normalizedType === "commit" || normalizedType === "author";
     }
 
-    function isMainTreeEdge(edge) {
-      const relation = String(edge.relation || edge.type || "").toUpperCase();
-      return relation === "MAIN_FLOW" || relation === "MAIN_TREE";
-    }
-
-    function collectMainTreeNodeIds(baseVisibleNodeIds) {
-      const mainTreeNodeIds = new Set();
-      state.edges.forEach((edge) => {
-        if (!isMainTreeEdge(edge)) {
-          return;
-        }
-
-        if (!baseVisibleNodeIds.has(edge.source) || !baseVisibleNodeIds.has(edge.target)) {
-          return;
-        }
-
-        mainTreeNodeIds.add(edge.source);
-        mainTreeNodeIds.add(edge.target);
-      });
-
-      return mainTreeNodeIds;
-    }
-
     function getVisibleGraph() {
       const baseVisibleNodeIds = new Set();
       state.nodes.forEach((node) => {
-        if (!state.showLifecycleNodes && isLifecycleNode(node)) {
-          return;
-        }
-
-        if (!state.showNonCodeFiles && isNonCodeFileNode(node)) {
+        if (isLifecycleNode(node)) {
           return;
         }
 
         baseVisibleNodeIds.add(node.id);
       });
 
-      let visibleNodeIds = baseVisibleNodeIds;
-      let visibleEdges = state.edges.filter((edge) => (
+      const visibleEdges = state.edges.filter((edge) => (
         baseVisibleNodeIds.has(edge.source) && baseVisibleNodeIds.has(edge.target)
       ));
 
-      if (state.graphMode === "main_tree") {
-        visibleNodeIds = collectMainTreeNodeIds(baseVisibleNodeIds);
-        visibleEdges = state.edges.filter((edge) => (
-          isMainTreeEdge(edge) &&
-          visibleNodeIds.has(edge.source) &&
-          visibleNodeIds.has(edge.target)
-        ));
-      }
-
       return {
-        nodes: state.nodes.filter((node) => visibleNodeIds.has(node.id)),
+        nodes: state.nodes.filter((node) => baseVisibleNodeIds.has(node.id)),
         edges: visibleEdges
       };
-    }
-
-    function updateLifecycleToggleUi() {
-      const enabled = state.showLifecycleNodes;
-      toggleLifecycleBtnEl.classList.toggle("active", enabled);
-      toggleLifecycleBtnEl.textContent = enabled ? "Hide Commit+Author" : "Show Commit+Author";
-    }
-
-    function updateNonCodeToggleUi() {
-      const enabled = state.showNonCodeFiles;
-      toggleNonCodeBtnEl.classList.toggle("active", enabled);
-      toggleNonCodeBtnEl.textContent = enabled ? "Hide Non-Code Files" : "Show Non-Code Files";
-    }
-
-    function updateGraphModeUi() {
-      const isMainTree = state.graphMode === "main_tree";
-      fullGraphModeBtnEl.classList.toggle("active", !isMainTree);
-      mainTreeModeBtnEl.classList.toggle("active", isMainTree);
-      modeLegendChipEl.textContent = isMainTree ? "Mode: Main Tree" : "Mode: Full Graph";
     }
 
     function getDisplayLabel(node) {
@@ -1121,17 +1022,7 @@
     }
 
     function buildModeStatus(prefix) {
-      const graphModePart = state.graphMode === "main_tree"
-        ? "Main Tree mode"
-        : "Full Graph mode";
-      const lifecyclePart = state.showLifecycleNodes
-        ? "Full graph mode (Commit/Author visible)"
-        : "CodeGraph mode (Commit/Author hidden)";
-      const nonCodePart = state.showNonCodeFiles
-        ? "non-code files visible"
-        : "Source Code Focus ON";
-
-      return `${prefix} ${graphModePart}; ${lifecyclePart}; ${nonCodePart}; heatmap active for File/Function.`;
+      return `${prefix} CodeGraph mode (Commit/Author hidden); all source file nodes visible; heatmap active for File/Function.`;
     }
 
     async function loadNodeInsights(nodeId) {
@@ -1249,7 +1140,7 @@
         const visibleResults = results.filter((item) => visibleNodeIds.has(item.id));
         if (visibleResults.length === 0) {
           clearSearchHighlights();
-          setStatus("Results found, but all matches are hidden by Source Code Focus.");
+          setStatus("Results found, but all matches are hidden with Commit/Author nodes filtered out.");
           return;
         }
 
@@ -1274,16 +1165,6 @@
       } catch (err) {
         setStatus("Search failed: " + err.message);
       }
-    }
-
-    function rerenderGraphWithCurrentFilter() {
-      const visibleGraph = getVisibleGraph();
-      nodeCountEl.textContent = String(visibleGraph.nodes.length);
-      edgeCountEl.textContent = String(visibleGraph.edges.length);
-      render2d(visibleGraph.nodes, visibleGraph.edges);
-      clearSelectionPanel();
-      clearSearchHighlights();
-      setStatus(buildModeStatus("Graph filters updated."));
     }
 
     function render2d(nodes, edges) {
@@ -1414,41 +1295,6 @@
 
     document.getElementById("loadBtn").addEventListener("click", loadGraph);
     document.getElementById("searchBtn").addEventListener("click", runSearch);
-    document.getElementById("mode2d").addEventListener("click", center2dGraph);
-    toggleLifecycleBtnEl.addEventListener("click", () => {
-      state.showLifecycleNodes = !state.showLifecycleNodes;
-      updateLifecycleToggleUi();
-      if (state.nodes.length > 0) {
-        rerenderGraphWithCurrentFilter();
-      }
-    });
-    toggleNonCodeBtnEl.addEventListener("click", () => {
-      state.showNonCodeFiles = !state.showNonCodeFiles;
-      updateNonCodeToggleUi();
-      if (state.nodes.length > 0) {
-        rerenderGraphWithCurrentFilter();
-      }
-    });
-    fullGraphModeBtnEl.addEventListener("click", () => {
-      if (state.graphMode === "full") {
-        return;
-      }
-      state.graphMode = "full";
-      updateGraphModeUi();
-      if (state.nodes.length > 0) {
-        rerenderGraphWithCurrentFilter();
-      }
-    });
-    mainTreeModeBtnEl.addEventListener("click", () => {
-      if (state.graphMode === "main_tree") {
-        return;
-      }
-      state.graphMode = "main_tree";
-      updateGraphModeUi();
-      if (state.nodes.length > 0) {
-        rerenderGraphWithCurrentFilter();
-      }
-    });
     searchInputEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         runSearch();
@@ -1496,9 +1342,6 @@
       }
     });
     updateCommitNavigator();
-    updateLifecycleToggleUi();
-    updateNonCodeToggleUi();
-    updateGraphModeUi();
   </script>
 </body>
 </html>

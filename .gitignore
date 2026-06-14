@@ -28,3 +28,4 @@ rustc-ice-*.txt
 /target
 .repodna
 .fastembed_cache/
+docs/superpowers

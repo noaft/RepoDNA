@@ -932,11 +932,8 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
         repository.prune_files_not_in_paths(&current_file_paths)?;
         repository.prune_directories_not_in_paths(&current_directory_paths)?;
 
-        let rust_files = collect_rust_source_files(workdir)?;
-        let mut rust_snapshots = Vec::<RustFileSnapshot>::new();
-
-        for rust_file in rust_files {
-            let file_path = rust_file.strip_prefix(workdir).unwrap_or(&rust_file);
+        for repo_file in &repo_files {
+            let file_path = repo_file.strip_prefix(workdir).unwrap_or(repo_file);
             let file_path_str = file_path.to_string_lossy().replace('\\', "/");
 
             let file_node = FileNode::from_path(&file_path_str);
@@ -956,6 +953,16 @@ pub fn build_graph(repo_path: &str) -> Result<IngestionReport, Box<dyn std::erro
                     contains_edges_inserted += 1;
                 }
             }
+        }
+
+        let rust_files = collect_rust_source_files(workdir)?;
+        let mut rust_snapshots = Vec::<RustFileSnapshot>::new();
+
+        for rust_file in rust_files {
+            let file_path = rust_file.strip_prefix(workdir).unwrap_or(&rust_file);
+            let file_path_str = file_path.to_string_lossy().replace('\\', "/");
+
+            let file_node = FileNode::from_path(&file_path_str);
 
             let content = fs::read_to_string(&rust_file)?;
             let symbols = extract_rust_symbols(&file_path_str, &content)?;
@@ -1989,6 +1996,51 @@ mod tests {
         assert_eq!(hotspot_count, file_count);
         assert_eq!(report.ownership_files_computed as i64, file_count);
         assert_eq!(report.hotspot_files_computed as i64, file_count);
+    }
+
+    #[test]
+    fn build_graph_adds_non_rust_files_as_file_nodes_without_symbols() {
+        let (temp_dir, _repo) = init_repo_with_commits(&["first"]);
+        let src_dir = temp_dir.path().join("src");
+        let config_dir = temp_dir.path().join("config");
+        std::fs::create_dir_all(&src_dir).expect("src dir should be created");
+        std::fs::create_dir_all(&config_dir).expect("config dir should be created");
+        std::fs::write(src_dir.join("lib.rs"), "fn run() {}\n")
+            .expect("rust file should be written");
+        std::fs::write(config_dir.join("app.json"), "{\"enabled\":true}\n")
+            .expect("json file should be written");
+
+        let report = build_graph(temp_dir.path().to_str().expect("valid path"))
+            .expect("build should succeed");
+
+        let db = Connection::open(report.db_path).expect("db should open");
+        let json_file_id = FileNode::from_path("config/app.json").id;
+        let config_dir_id = DirectoryNode::from_path("config").id;
+        let json_file_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE id = ?1 AND type = 'File'",
+                [&json_file_id],
+                |row| row.get(0),
+            )
+            .expect("json file count should succeed");
+        let contains_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM edges WHERE source = ?1 AND target = ?2 AND relation = 'CONTAINS'",
+                [&config_dir_id, &json_file_id],
+                |row| row.get(0),
+            )
+            .expect("contains count should succeed");
+        let json_function_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE type = 'Function' AND metadata LIKE '%config/app.json%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("json function count should succeed");
+
+        assert_eq!(json_file_count, 1);
+        assert_eq!(contains_count, 1);
+        assert_eq!(json_function_count, 0);
     }
 
     #[test]
