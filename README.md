@@ -198,6 +198,12 @@ Register it with Codex:
 codex mcp add repo_dna --env REPODNA_HOME=D:\RepoDNA\.repodna -- cargo run --bin repodna_mcp -- D:\Git\RepoDNA
 ```
 
+Current MCP tools:
+
+- `search_nodes`: find graph landing points with the same SQLite FTS/BM25 index used by the graph viewer search. A node can be a file, directory, function, struct, trait/interface, global, or future code entity. Search by partial name, path, node type, symbol, exact node id, or short natural-language terms, then inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` to decide the next read/query action.
+- `add_function_context`: save durable context for a function node.
+- `update_function_description`: replace stale function context and refresh its embedding.
+
 Repo-specific storage is automatic when `REPODNA_DB_PATH` is unset. For example,
 `D:\Git\RepoA` and `D:\Git\RepoB` get separate graph databases under
 `REPODNA_HOME`, so search results stay scoped to the repository passed to

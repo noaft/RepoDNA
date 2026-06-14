@@ -18,25 +18,16 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SearchFunctionsParams {
-    /// Exact-ish function lookup only: pass one function name, function id, Rust symbol path, or file path hint.
-    /// Do not pass natural language, behavior descriptions, or many unrelated words; use search_function_contexts for that.
+struct SearchNodesParams {
+    /// Search hint for any RepoDNA graph node. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Use a concrete name, id, node type, file path, or symbol hint such as README.md, src/ingestion/mod.rs, build_graph, File, Directory, or Function.
     query: String,
-    /// Maximum number of function nodes to return. Defaults to 20 and is clamped to 1..=100.
-    limit: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SearchFunctionContextsParams {
-    /// Natural-language or behavior-oriented query for saved function summaries, such as "starts MCP server" or "builds repository graph".
-    query: String,
-    /// Maximum number of function contexts to return. Defaults to 20 and is clamped to 1..=100.
+    /// Maximum number of graph nodes to return. Defaults to 20 and is clamped to 1..=100.
     limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AddFunctionContextParams {
-    /// Exact function id returned by search_functions.
+    /// Exact function id returned by search_nodes.
     function_id: String,
     /// Concise high-level description of what the function is for.
     summary: String,
@@ -44,29 +35,33 @@ struct AddFunctionContextParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct UpdateFunctionDescriptionParams {
-    /// Exact function id returned by search_functions.
+    /// Exact function id returned by search_nodes.
     function_id: String,
     /// Replacement high-level description of what the function is for.
     description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-struct FunctionNodeResult {
+struct GraphNodeResult {
+    /// Durable human/tool-written context attached to this node. It may be empty when no context has been saved yet.
     summary: String,
+    /// Stable graph node id. Use this exact id for follow-up tools and graph traversal.
     id: String,
+    /// Node kind, such as File, Directory, Function, Struct, Interface, or GlobalVariable.
     r#type: String,
+    /// Display and search name for the node. For files and directories this is usually a path; for code symbols this is usually the symbol name.
     name: String,
+    /// Optional JSON metadata string with extra facts, such as file path, line number, symbol kind, deletion state, or other ingestion details.
     metadata: Option<String>,
+    /// Raw SQLite FTS BM25 score from the same search index used by the graph viewer. Lower is better.
+    bm25_score: f64,
+    /// Human-friendly relevance derived from bm25_score. Higher is better and closer to 1.0 means more relevant.
+    relevance: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-struct SearchFunctionsResponse {
-    results: Vec<FunctionNodeResult>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-struct SearchFunctionContextsResponse {
-    results: Vec<FunctionNodeResult>,
+struct SearchNodesResponse {
+    results: Vec<GraphNodeResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -92,7 +87,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory. Use a memory-first workflow: before reading files broadly to understand repository code, call search_function_contexts for natural-language, behavioral, or semantic questions. It ranks saved function summaries by embedding similarity when summary embeddings are available, then falls back to lexical matching. Only call search_functions when you already have one concrete function name, function id, Rust symbol path, or file path hint; do not pass long free-text context into search_functions. If a matching function is found with a useful summary, use that saved context first. If the function exists but its summary is empty or too generic, inspect the source code yourself, then call add_function_context with the exact function_id and a concise high-level summary so future sessions do not rediscover it. If RepoDNA returns no relevant result, fall back to normal code search and reading.".to_string(),
+                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. Call search_nodes first for repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n2. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n3. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n4. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n5. If a relevant function summary is missing after you inspect the source, call add_function_context with the exact function_id so the next session does not rediscover it.\n6. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -109,33 +104,19 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Exact-ish function lookup in RepoDNA's graph. Use ONLY when you already know one concrete function name, function id, Rust symbol path, or file path hint. Do NOT pass natural language, behavior descriptions, or combined keywords like 'run main build graph CLI entrypoint'; use search_function_contexts for that. Parameter query should be a short single lookup hint, e.g. 'serve_graph_api', 'src/api/mod.rs', or an exact function_id. Returns function nodes with names, ids, summaries, and metadata."
+        description = "Search RepoDNA's graph for code/source nodes using the same SQLite FTS/BM25 index as the graph viewer search. A node is a graph landing point and can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Use this before reading files broadly. Query with partial names, paths, node types, symbols, exact node ids, or short natural-language terms, for example 'build_graph', 'src/api/mod.rs', 'README.md', 'File', 'Directory', 'Function', or 'graph build'. Results are not final answers: inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read/query action."
     )]
-    async fn search_functions(
+    async fn search_nodes(
         &self,
-        Parameters(SearchFunctionsParams { query, limit }): Parameters<SearchFunctionsParams>,
-    ) -> Result<Json<SearchFunctionsResponse>, String> {
-        search_function_nodes(&self.db_path, &query, limit.unwrap_or(20))
-            .map(|results| Json(SearchFunctionsResponse { results }))
+        Parameters(SearchNodesParams { query, limit }): Parameters<SearchNodesParams>,
+    ) -> Result<Json<SearchNodesResponse>, String> {
+        search_graph_nodes(&self.db_path, &query, limit.unwrap_or(20))
+            .map(|results| Json(SearchNodesResponse { results }))
             .map_err(|err| err.to_string())
     }
 
     #[tool(
-        description = "Search saved function context by summary. Use this FIRST for natural-language, behavioral, or semantic questions about what code does, such as 'CLI entrypoint for build/update' or 'starts MCP stdio server'. Parameter query may be a phrase or sentence. This ranks functions with non-empty summaries by embedding similarity when compatible summary embeddings exist, falls back to summary phrase/term overlap otherwise, and returns node-shaped JSON results. If this returns no useful result, use search_functions only with a concrete function name/id/file hint, then read source/add_function_context as needed."
-    )]
-    async fn search_function_contexts(
-        &self,
-        Parameters(SearchFunctionContextsParams { query, limit }): Parameters<
-            SearchFunctionContextsParams,
-        >,
-    ) -> Result<Json<SearchFunctionContextsResponse>, String> {
-        search_function_contexts(&self.db_path, &query, limit.unwrap_or(20))
-            .map(|results| Json(SearchFunctionContextsResponse { results }))
-            .map_err(|err| err.to_string())
-    }
-
-    #[tool(
-        description = "Add or replace durable context for a function node in RepoDNA's graph. Use this after search_functions finds a function but the summary is empty, stale, or too generic, and you have inspected the source code enough to summarize what the function is for. Save concise, high-level context that future tools can trust before rediscovering the code. Requires an exact function_id from search_functions and a summary."
+        description = "Add or replace durable context for a function node in RepoDNA's graph. Use this after search_nodes finds a function but the summary is empty, stale, or too generic, and you have inspected the source code enough to summarize what the function is for. Save concise, high-level context that future tools can trust before rediscovering the code. Requires an exact function_id from search_nodes and a summary."
     )]
     async fn add_function_context(
         &self,
@@ -150,7 +131,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Update the durable description for an existing function node and regenerate its summary embedding. Use this when a saved function description is stale, incomplete, or wrong. Requires an exact function_id from search_functions and a replacement description."
+        description = "Update the durable description for an existing function node and regenerate its summary embedding. Use this when a saved function description is stale, incomplete, or wrong. Requires an exact function_id from search_nodes and a replacement description."
     )]
     async fn update_function_description(
         &self,
@@ -182,43 +163,40 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn search_function_nodes(
-    db_path: &Path,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<FunctionNodeResult>> {
+fn search_graph_nodes(db_path: &Path, query: &str, limit: usize) -> Result<Vec<GraphNodeResult>> {
     let conn = open_existing_graph_db(db_path)?;
     let trimmed = query.trim();
-    validate_function_lookup_query(trimmed)?;
-    let search = format!("%{}%", trimmed);
+    validate_node_lookup_query(trimmed)?;
+    let fts_query = format_fts_query(trimmed)?;
+    ensure_nodes_fts_index(&conn)?;
     let safe_limit = limit.clamp(1, 100) as i64;
 
     let mut stmt = conn.prepare(
         "SELECT
-            COALESCE(summary, ''),
-            id,
-            type,
-            name,
-            metadata
-         FROM nodes
-         WHERE type = 'Function'
-           AND (
-               ?1 = ''
-               OR id LIKE ?2
-               OR name LIKE ?2
-               OR COALESCE(json_extract(metadata, '$.file'), '') LIKE ?2
-           )
-         ORDER BY name ASC, id ASC
-         LIMIT ?3",
+            COALESCE(n.summary, ''),
+            n.id,
+            n.type,
+            n.name,
+            n.metadata,
+            bm25(nodes_fts) AS score
+         FROM nodes_fts
+         JOIN nodes n ON n.id = nodes_fts.id
+         WHERE nodes_fts MATCH ?1
+         ORDER BY score ASC
+         LIMIT ?2",
     )?;
 
-    let rows = stmt.query_map(params![trimmed, search, safe_limit], |row| {
-        Ok(FunctionNodeResult {
+    let rows = stmt.query_map(params![fts_query, safe_limit], |row| {
+        let bm25_score: f64 = row.get(5)?;
+        let relevance = 1.0 / (1.0 + bm25_score.abs());
+        Ok(GraphNodeResult {
             summary: row.get(0)?,
             id: row.get(1)?,
             r#type: row.get(2)?,
             name: row.get(3)?,
             metadata: row.get(4)?,
+            bm25_score,
+            relevance,
         })
     })?;
 
@@ -230,247 +208,41 @@ fn search_function_nodes(
     Ok(items)
 }
 
-fn validate_function_lookup_query(query: &str) -> Result<()> {
+fn validate_node_lookup_query(query: &str) -> Result<()> {
     if query.is_empty() {
-        bail!(
-            "search_functions query must be one concrete function name, function_id, Rust symbol path, or file path hint. Use search_function_contexts for broad context search."
-        );
-    }
-
-    let words = query
-        .split_whitespace()
-        .filter(|word| !word.trim().is_empty())
-        .count();
-    if words > 3 {
-        bail!(
-            "search_functions is for exact function lookup, not natural-language context. Use search_function_contexts for behavior or semantic queries."
-        );
+        bail!("search_nodes query must not be empty");
     }
 
     Ok(())
 }
 
-fn search_function_contexts(
-    db_path: &Path,
-    query: &str,
-    limit: usize,
-) -> Result<Vec<FunctionNodeResult>> {
-    search_function_contexts_with_embedder(db_path, query, limit, embeddings::embed_text)
-}
-
-fn search_function_contexts_with_embedder(
-    db_path: &Path,
-    query: &str,
-    limit: usize,
-    embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
-) -> Result<Vec<FunctionNodeResult>> {
-    let conn = open_existing_graph_db(db_path)?;
-    let terms = query_terms(query);
-    let safe_limit = limit.clamp(1, 100);
+fn format_fts_query(query: &str) -> Result<String> {
+    let terms = query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|term| !term.trim().is_empty())
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
 
     if terms.is_empty() {
-        return Ok(Vec::new());
+        bail!("search_nodes query must contain at least one searchable term");
     }
 
-    if has_function_summary_embeddings(&conn)?
-        && let Ok(query_embedding) = embedder(query.trim())
-    {
-        let semantic_results =
-            search_function_contexts_by_embedding(&conn, &query_embedding, safe_limit)?;
-        if !semantic_results.is_empty() {
-            return Ok(semantic_results);
-        }
-    }
-
-    search_function_contexts_lexical(&conn, query, &terms, safe_limit)
+    Ok(terms.join(" OR "))
 }
 
-fn has_function_summary_embeddings(conn: &Connection) -> Result<bool> {
-    let table_exists: bool = conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1
-            FROM sqlite_master
-            WHERE type = 'table'
-              AND name = 'function_summary_embeddings'
-        )",
+fn ensure_nodes_fts_index(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts
+         USING fts5(id, name, metadata, tokenize = 'unicode61')",
         [],
-        |row| row.get(0),
     )?;
-    if !table_exists {
-        return Ok(false);
-    }
-
-    let has_rows: bool = conn.query_row(
-        "SELECT EXISTS(
-            SELECT 1
-            FROM function_summary_embeddings
-            LIMIT 1
-        )",
+    conn.execute("DELETE FROM nodes_fts", [])?;
+    conn.execute(
+        "INSERT INTO nodes_fts(id, name, metadata)
+         SELECT id, name, type || ' ' || COALESCE(metadata, '') FROM nodes",
         [],
-        |row| row.get(0),
     )?;
-
-    Ok(has_rows)
-}
-
-fn search_function_contexts_lexical(
-    conn: &Connection,
-    query: &str,
-    terms: &[String],
-    safe_limit: usize,
-) -> Result<Vec<FunctionNodeResult>> {
-    if terms.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT
-            COALESCE(summary, ''),
-            id,
-            type,
-            name,
-            metadata
-         FROM nodes
-         WHERE type = 'Function'
-           AND TRIM(COALESCE(summary, '')) <> ''",
-    )?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok(FunctionNodeResult {
-            summary: row.get(0)?,
-            id: row.get(1)?,
-            r#type: row.get(2)?,
-            name: row.get(3)?,
-            metadata: row.get(4)?,
-        })
-    })?;
-
-    let phrase = query.trim().to_ascii_lowercase();
-    let mut scored = Vec::new();
-    for row in rows {
-        let item = row?;
-        let summary = item.summary.to_ascii_lowercase();
-        let matched_terms = terms.iter().filter(|term| summary.contains(*term)).count();
-        if matched_terms == 0 {
-            continue;
-        }
-
-        let phrase_bonus = usize::from(!phrase.is_empty() && summary.contains(&phrase));
-        let score = matched_terms + phrase_bonus * terms.len();
-        scored.push((score, item.name.clone(), item.id.clone(), item));
-    }
-
-    scored.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-
-    Ok(scored
-        .into_iter()
-        .take(safe_limit)
-        .map(|(_, _, _, item)| item)
-        .collect())
-}
-
-fn search_function_contexts_by_embedding(
-    conn: &Connection,
-    query_embedding: &embeddings::EmbeddingResult,
-    safe_limit: usize,
-) -> Result<Vec<FunctionNodeResult>> {
-    if query_embedding.vector.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut stmt = conn.prepare(
-        "SELECT
-            COALESCE(nodes.summary, ''),
-            nodes.id,
-            nodes.type,
-            nodes.name,
-            nodes.metadata,
-            function_summary_embeddings.embedding
-         FROM nodes
-         JOIN function_summary_embeddings
-           ON function_summary_embeddings.function_id = nodes.id
-         WHERE nodes.type = 'Function'
-           AND TRIM(COALESCE(nodes.summary, '')) <> ''
-           AND function_summary_embeddings.model = ?1
-           AND function_summary_embeddings.dimensions = ?2",
-    )?;
-
-    let rows = stmt.query_map(
-        params![query_embedding.model, query_embedding.vector.len() as i64],
-        |row| {
-            let item = FunctionNodeResult {
-                summary: row.get(0)?,
-                id: row.get(1)?,
-                r#type: row.get(2)?,
-                name: row.get(3)?,
-                metadata: row.get(4)?,
-            };
-            let embedding: Vec<u8> = row.get(5)?;
-            Ok((item, embedding))
-        },
-    )?;
-
-    let mut scored = Vec::new();
-    for row in rows {
-        let (item, embedding_blob) = row?;
-        let embedding = decode_embedding_blob(&embedding_blob);
-        if embedding.len() != query_embedding.vector.len() {
-            continue;
-        }
-
-        if let Some(score) = cosine_similarity(&query_embedding.vector, &embedding) {
-            scored.push((score, item.name.clone(), item.id.clone(), item));
-        }
-    }
-
-    scored.sort_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(&right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-
-    Ok(scored
-        .into_iter()
-        .take(safe_limit)
-        .map(|(_, _, _, item)| item)
-        .collect())
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-
-    let mut dot = 0.0_f32;
-    let mut left_norm = 0.0_f32;
-    let mut right_norm = 0.0_f32;
-    for (left_value, right_value) in left.iter().zip(right.iter()) {
-        dot += left_value * right_value;
-        left_norm += left_value * left_value;
-        right_norm += right_value * right_value;
-    }
-
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return None;
-    }
-
-    Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
-}
-
-fn query_terms(query: &str) -> Vec<String> {
-    query
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|term| term.len() > 1)
-        .map(str::to_ascii_lowercase)
-        .collect()
+    Ok(())
 }
 
 fn add_function_context(
@@ -626,6 +398,7 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
+#[cfg(test)]
 fn decode_embedding_blob(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
@@ -664,6 +437,11 @@ mod tests {
             [],
         )?;
         conn.execute(
+            "CREATE VIRTUAL TABLE nodes_fts
+             USING fts5(id, name, metadata, tokenize = 'unicode61')",
+            [],
+        )?;
+        conn.execute(
             "INSERT INTO nodes (id, type, name, summary, metadata)
              VALUES (?1, 'Function', 'build_graph', '', ?2)",
             params![
@@ -676,7 +454,28 @@ mod tests {
              VALUES (?1, 'Function', 'old_graph', '', ?2)",
             params!["function:src/old.rs:old_graph", r#"{"file":"src/old.rs"}"#],
         )?;
+        conn.execute(
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, 'File', 'README.md', '', NULL)",
+            params!["file:README.md"],
+        )?;
+        conn.execute(
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, 'Directory', 'src', '', NULL)",
+            params!["dir:src"],
+        )?;
+        refresh_test_nodes_fts(&conn)?;
         Ok(file)
+    }
+
+    fn refresh_test_nodes_fts(conn: &Connection) -> Result<()> {
+        conn.execute("DELETE FROM nodes_fts", [])?;
+        conn.execute(
+            "INSERT INTO nodes_fts(id, name, metadata)
+             SELECT id, name, type || ' ' || COALESCE(metadata, '') FROM nodes",
+            [],
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -788,117 +587,114 @@ mod tests {
     }
 
     #[test]
-    fn search_functions_does_not_match_saved_summary_context() -> Result<()> {
+    fn search_graph_nodes_accepts_multi_term_queries() -> Result<()> {
         let db = test_db()?;
-        add_function_context_with_embedder(
-            db.path(),
-            "function:src/main.rs:build_graph",
-            "Builds the durable repository graph used by local tools.",
-            fake_embed,
-        )?;
 
-        let results = search_function_nodes(db.path(), "durable repository graph", 20)?;
+        let results = search_graph_nodes(db.path(), "src main", 20)?;
 
-        assert!(results.is_empty());
+        assert!(!results.is_empty());
 
         Ok(())
     }
 
     #[test]
-    fn search_functions_rejects_context_like_query() -> Result<()> {
+    fn search_node_schemas_explain_parameters_and_result_fields() {
+        let params_schema = serde_json::to_value(super::schemars::schema_for!(SearchNodesParams))
+            .expect("params schema should serialize");
+        let query_description = params_schema["properties"]["query"]["description"]
+            .as_str()
+            .expect("query field should have a description");
+        assert!(query_description.contains("File"));
+        assert!(query_description.contains("Directory"));
+        assert!(query_description.contains("Function"));
+
+        let result_schema = serde_json::to_value(super::schemars::schema_for!(GraphNodeResult))
+            .expect("result schema should serialize");
+
+        for field in [
+            "summary",
+            "id",
+            "type",
+            "name",
+            "metadata",
+            "bm25_score",
+            "relevance",
+        ] {
+            let description = result_schema["properties"][field]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{field} field should have a description"));
+            assert!(
+                !description.trim().is_empty(),
+                "{field} field description should not be empty"
+            );
+        }
+    }
+
+    #[test]
+    fn server_instructions_define_memory_first_decision_policy() {
+        let service = RepoDnaMcp::new(PathBuf::from("graph.db"));
+        let info = service.get_info();
+        let instructions = info
+            .instructions
+            .expect("server should provide workflow instructions");
+
+        for phrase in [
+            "Before reading files broadly",
+            "search_nodes",
+            "A node is",
+            "File",
+            "Directory",
+            "Function",
+            "BM25",
+            "fallback",
+        ] {
+            assert!(
+                instructions.contains(phrase),
+                "instructions should contain '{phrase}'"
+            );
+        }
+    }
+
+    #[test]
+    fn search_graph_nodes_matches_files_directories_and_functions() -> Result<()> {
         let db = test_db()?;
 
-        let error = search_function_nodes(
-            db.path(),
-            "run main build_graph_extracts_main CLI entrypoint",
-            20,
-        )
-        .unwrap_err();
+        let file_results = search_graph_nodes(db.path(), "README.md", 20)?;
+        assert_eq!(file_results.len(), 1);
+        assert_eq!(file_results[0].id, "file:README.md");
+        assert_eq!(file_results[0].r#type, "File");
 
-        assert!(error.to_string().contains("search_function_contexts"));
+        let directory_results = search_graph_nodes(db.path(), "Directory", 20)?;
+        assert_eq!(directory_results.len(), 1);
+        assert_eq!(directory_results[0].id, "dir:src");
+        assert_eq!(directory_results[0].r#type, "Directory");
+
+        let function_results = search_graph_nodes(db.path(), "build_graph", 20)?;
+        assert_eq!(function_results.len(), 1);
+        assert_eq!(function_results[0].id, "function:src/main.rs:build_graph");
+        assert_eq!(function_results[0].r#type, "Function");
 
         Ok(())
     }
 
     #[test]
-    fn search_function_contexts_matches_summary_terms_and_skips_empty_summaries() -> Result<()> {
-        let db = test_db()?;
-        add_function_context_with_embedder(
-            db.path(),
-            "function:src/main.rs:build_graph",
-            "Builds the durable repository graph used by local tools.",
-            fake_embed,
-        )?;
-
-        let results = search_function_contexts(db.path(), "durable local tools", 20)?;
-
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "function:src/main.rs:build_graph");
-        assert_eq!(
-            results[0].summary,
-            "Builds the durable repository graph used by local tools."
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_function_contexts_uses_embeddings_when_terms_do_not_match() -> Result<()> {
-        let db = test_db()?;
-        add_function_context_with_embedder(
-            db.path(),
-            "function:src/main.rs:build_graph",
-            "Initializes handshake transport for tool clients.",
-            fake_semantic_embed,
-        )?;
-        add_function_context_with_embedder(
-            db.path(),
-            "function:src/old.rs:old_graph",
-            "Prunes archived snapshots from obsolete graph state.",
-            fake_semantic_embed,
-        )?;
-
-        let conn = Connection::open(db.path())?;
-        let terms = query_terms("server startup");
-        let lexical_results =
-            search_function_contexts_lexical(&conn, "server startup", &terms, 20)?;
-        assert!(lexical_results.is_empty());
-
-        let semantic_results = search_function_contexts_with_embedder(
-            db.path(),
-            "server startup",
-            20,
-            fake_semantic_embed,
-        )?;
-
-        assert_eq!(semantic_results.len(), 2);
-        assert_eq!(semantic_results[0].id, "function:src/main.rs:build_graph");
-
-        Ok(())
-    }
-
-    #[test]
-    fn search_function_contexts_falls_back_to_lexical_without_embedding_table() -> Result<()> {
+    fn search_graph_nodes_uses_graph_viewer_bm25_index() -> Result<()> {
         let db = test_db()?;
         let conn = Connection::open(db.path())?;
         conn.execute(
-            "UPDATE nodes SET summary = ?2 WHERE id = ?1",
-            params![
-                "function:src/main.rs:build_graph",
-                "Builds the durable repository graph used by local tools."
-            ],
+            "INSERT INTO nodes (id, type, name, summary, metadata)
+             VALUES (?1, 'File', 'src/api/mod.rs', '', ?2)",
+            params!["file:src/api/mod.rs", r#"{"file":"src/api/mod.rs"}"#],
         )?;
+        refresh_test_nodes_fts(&conn)?;
         drop(conn);
 
-        let results = search_function_contexts_with_embedder(
-            db.path(),
-            "durable local tools",
-            20,
-            panic_if_called_embed,
-        )?;
+        let results = search_graph_nodes(db.path(), "src api", 20)?;
 
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "function:src/main.rs:build_graph");
+        assert!(!results.is_empty());
+        assert_eq!(results[0].id, "file:src/api/mod.rs");
+        assert!(results[0].relevance > 0.0);
+        assert!(results[0].bm25_score.is_finite());
 
         Ok(())
     }
@@ -929,7 +725,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let missing_db = dir.path().join("missing-graph.db");
 
-        let search_error = search_function_nodes(&missing_db, "build_graph", 20).unwrap_err();
+        let search_error = search_graph_nodes(&missing_db, "build_graph", 20).unwrap_err();
         assert!(
             search_error
                 .to_string()
@@ -971,24 +767,5 @@ mod tests {
                 text.bytes().next().unwrap_or_default() as f32,
             ],
         })
-    }
-
-    fn fake_semantic_embed(text: &str) -> Result<embeddings::EmbeddingResult> {
-        assert!(!text.trim().is_empty());
-        let vector = match text {
-            "server startup" => vec![1.0, 0.0],
-            "Initializes handshake transport for tool clients." => vec![0.9, 0.1],
-            "Prunes archived snapshots from obsolete graph state." => vec![0.0, 1.0],
-            _ => vec![0.5, 0.5],
-        };
-
-        Ok(embeddings::EmbeddingResult {
-            model: "test-semantic-model".to_string(),
-            vector,
-        })
-    }
-
-    fn panic_if_called_embed(_text: &str) -> Result<embeddings::EmbeddingResult> {
-        panic!("embedder should not be called")
     }
 }

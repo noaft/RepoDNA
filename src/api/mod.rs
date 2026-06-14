@@ -298,7 +298,7 @@ fn ensure_graph_schema(db_path: &Path) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM nodes_fts", [])?;
     conn.execute(
         "INSERT INTO nodes_fts(id, name, metadata)
-         SELECT id, name, COALESCE(metadata, '') FROM nodes",
+         SELECT id, name, type || ' ' || COALESCE(metadata, '') FROM nodes",
         [],
     )?;
 
@@ -422,6 +422,7 @@ async fn search_nodes_bm25(
         return Ok(Json(Vec::new()));
     }
 
+    let fts_query = format_fts_query(term).map_err(internal_db_error)?;
     let conn = open_connection(&state.db_path)?;
     let mut stmt = conn
         .prepare(
@@ -435,7 +436,7 @@ async fn search_nodes_bm25(
         .map_err(internal_db_error)?;
 
     let rows = stmt
-        .query_map(params![term], |row| {
+        .query_map(params![fts_query], |row| {
             let bm25_score: f64 = row.get(5)?;
             let relevance = 1.0 / (1.0 + bm25_score.abs());
 
@@ -457,6 +458,20 @@ async fn search_nodes_bm25(
     }
 
     Ok(Json(items))
+}
+
+fn format_fts_query(query: &str) -> rusqlite::Result<String> {
+    let terms = query
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|term| !term.trim().is_empty())
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+
+    if terms.is_empty() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    Ok(terms.join(" OR "))
 }
 
 async fn get_commits_by_file(

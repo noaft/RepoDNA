@@ -34,7 +34,7 @@ Agents should preserve these project priorities:
 - [src/api/mod.rs](/abs/path/d:/Git/RepoDNA/src/api/mod.rs:1)
   Graph API server over the persisted database.
 - [src/bin/repodna_mcp.rs](/abs/path/d:/Git/RepoDNA/src/bin/repodna_mcp.rs:1)
-  MCP server. Right now it exposes graph-backed function search.
+  MCP server. Right now it exposes graph-backed node search plus function-context memory tools.
 - [src/settings.rs](/abs/path/d:/Git/RepoDNA/src/settings.rs:1)
   Central place for RepoDNA environment-driven settings.
 - [src/repodna_paths.rs](/abs/path/d:/Git/RepoDNA/src/repodna_paths.rs:1)
@@ -107,12 +107,14 @@ The MCP server must be easy to launch and resilient in local environments.
 
 When an agent needs to understand repository code, prefer RepoDNA memory before broad filesystem search:
 
-1. Call `search_function_contexts` for behavioral or semantic questions based on what a function is for.
-2. Call `search_functions` when you have a function name, symbol, id, or file hint.
-3. If a relevant result has a useful non-empty `summary`, use that saved context first.
-4. If a relevant function exists but `summary` is empty, stale, or too generic, inspect the source code yourself.
-5. After understanding the function, call `add_function_context` with the exact `function_id` and a concise high-level summary of what the function is for.
-6. If RepoDNA has no relevant result, fall back to normal code search and reading.
+1. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first.
+2. Call `search_nodes` for repository discovery. It uses the same SQLite FTS/BM25 node index as the graph viewer search and accepts concrete hints or short search terms: node name, type, id, symbol, file path, directory, or source-tree hint.
+3. Treat results as graph landing points: inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` before deciding what to read next.
+4. Remember that a node can be a `File`, `Directory`, `Function`, `Struct`, `Interface`, `GlobalVariable`, or future code entity.
+5. If a relevant result has a useful non-empty `summary`, use that saved context first.
+6. If a relevant function exists but `summary` is empty, stale, or too generic, inspect the source code yourself.
+7. After understanding the function, call `add_function_context` with the exact `function_id` and a concise high-level summary of what the function is for.
+8. If RepoDNA has no relevant result, fall back to normal code search and reading.
 
 This loop is core product behavior: every fresh investigation should improve durable repository memory for the next session.
 
