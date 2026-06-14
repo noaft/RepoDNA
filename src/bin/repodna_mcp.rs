@@ -26,18 +26,18 @@ struct SearchNodesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct AddFunctionContextParams {
-    /// Exact function id returned by search_nodes.
-    function_id: String,
-    /// Concise high-level description of what the function is for.
+struct AddNodeContextParams {
+    /// Exact graph node id returned by search_nodes. This can identify a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity.
+    node_id: String,
+    /// Concise high-level description of what this node is for.
     summary: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct UpdateFunctionDescriptionParams {
-    /// Exact function id returned by search_nodes.
-    function_id: String,
-    /// Replacement high-level description of what the function is for.
+struct UpdateNodeDescriptionParams {
+    /// Exact graph node id returned by search_nodes. This can identify a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity.
+    node_id: String,
+    /// Replacement high-level description of what this node is for.
     description: String,
 }
 
@@ -65,14 +65,18 @@ struct SearchNodesResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-struct AddFunctionContextResponse {
-    function_id: String,
+struct AddNodeContextResponse {
+    /// Exact graph node id whose durable context was added or replaced.
+    node_id: String,
+    /// Saved durable context summary for this node.
     summary: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-struct UpdateFunctionDescriptionResponse {
-    function_id: String,
+struct UpdateNodeDescriptionResponse {
+    /// Exact graph node id whose durable description was replaced.
+    node_id: String,
+    /// Replacement durable description saved for this node.
     description: String,
 }
 
@@ -87,7 +91,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. Call search_nodes first for repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n2. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n3. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n4. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n5. If a relevant function summary is missing after you inspect the source, call add_function_context with the exact function_id so the next session does not rediscover it.\n6. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
+                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. Call search_nodes first for repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n2. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n3. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n4. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n5. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n6. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -116,31 +120,28 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Add or replace durable context for a function node in RepoDNA's graph. Use this after search_nodes finds a function but the summary is empty, stale, or too generic, and you have inspected the source code enough to summarize what the function is for. Save concise, high-level context that future tools can trust before rediscovering the code. Requires an exact function_id from search_nodes and a summary."
+        description = "Add or replace durable context for any RepoDNA graph node. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Use this after search_nodes finds a relevant node but its summary is empty, stale, or too generic, and you have inspected enough source/docs to summarize what that node is for. Requires an exact node_id from search_nodes and a concise summary."
     )]
-    async fn add_function_context(
+    async fn add_node_context(
         &self,
-        Parameters(AddFunctionContextParams {
-            function_id,
-            summary,
-        }): Parameters<AddFunctionContextParams>,
-    ) -> Result<Json<AddFunctionContextResponse>, String> {
-        add_function_context(&self.db_path, &function_id, &summary)
+        Parameters(AddNodeContextParams { node_id, summary }): Parameters<AddNodeContextParams>,
+    ) -> Result<Json<AddNodeContextResponse>, String> {
+        add_node_context(&self.db_path, &node_id, &summary)
             .map(Json)
             .map_err(|err| err.to_string())
     }
 
     #[tool(
-        description = "Update the durable description for an existing function node and regenerate its summary embedding. Use this when a saved function description is stale, incomplete, or wrong. Requires an exact function_id from search_nodes and a replacement description."
+        description = "Update the durable description for any existing RepoDNA graph node and regenerate its summary embedding. Use this when a saved node description is stale, incomplete, or wrong. Requires an exact node_id from search_nodes and a replacement description."
     )]
-    async fn update_function_description(
+    async fn update_node_description(
         &self,
-        Parameters(UpdateFunctionDescriptionParams {
-            function_id,
+        Parameters(UpdateNodeDescriptionParams {
+            node_id,
             description,
-        }): Parameters<UpdateFunctionDescriptionParams>,
-    ) -> Result<Json<UpdateFunctionDescriptionResponse>, String> {
-        update_function_description(&self.db_path, &function_id, &description)
+        }): Parameters<UpdateNodeDescriptionParams>,
+    ) -> Result<Json<UpdateNodeDescriptionResponse>, String> {
+        update_node_description(&self.db_path, &node_id, &description)
             .map(Json)
             .map_err(|err| err.to_string())
     }
@@ -245,75 +246,69 @@ fn ensure_nodes_fts_index(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn add_function_context(
+fn add_node_context(
     db_path: &Path,
-    function_id: &str,
+    node_id: &str,
     summary: &str,
-) -> Result<AddFunctionContextResponse> {
-    add_function_context_with_embedder(db_path, function_id, summary, embeddings::embed_text)
+) -> Result<AddNodeContextResponse> {
+    add_node_context_with_embedder(db_path, node_id, summary, embeddings::embed_text)
 }
 
-fn update_function_description(
+fn update_node_description(
     db_path: &Path,
-    function_id: &str,
+    node_id: &str,
     description: &str,
-) -> Result<UpdateFunctionDescriptionResponse> {
-    update_function_description_with_embedder(
-        db_path,
-        function_id,
-        description,
-        embeddings::embed_text,
-    )
+) -> Result<UpdateNodeDescriptionResponse> {
+    update_node_description_with_embedder(db_path, node_id, description, embeddings::embed_text)
 }
 
-fn update_function_description_with_embedder(
+fn update_node_description_with_embedder(
     db_path: &Path,
-    function_id: &str,
+    node_id: &str,
     description: &str,
     embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
-) -> Result<UpdateFunctionDescriptionResponse> {
-    let response = add_function_context_with_embedder(db_path, function_id, description, embedder)?;
+) -> Result<UpdateNodeDescriptionResponse> {
+    let response = add_node_context_with_embedder(db_path, node_id, description, embedder)?;
 
-    Ok(UpdateFunctionDescriptionResponse {
-        function_id: response.function_id,
+    Ok(UpdateNodeDescriptionResponse {
+        node_id: response.node_id,
         description: response.summary,
     })
 }
 
-fn add_function_context_with_embedder(
+fn add_node_context_with_embedder(
     db_path: &Path,
-    function_id: &str,
+    node_id: &str,
     summary: &str,
     embedder: impl Fn(&str) -> Result<embeddings::EmbeddingResult>,
-) -> Result<AddFunctionContextResponse> {
+) -> Result<AddNodeContextResponse> {
     let mut conn = open_existing_graph_db(db_path)?;
-    let trimmed_id = function_id.trim();
+    let trimmed_id = node_id.trim();
     let trimmed_summary = summary.trim();
 
     if trimmed_id.is_empty() {
-        bail!("function_id must not be empty");
+        bail!("node_id must not be empty");
     }
     if trimmed_summary.is_empty() {
         bail!("summary must not be empty");
     }
 
-    ensure_function_summary_embedding_schema(&conn)?;
-    let function_exists: bool = conn.query_row(
+    ensure_node_summary_embedding_schema(&conn)?;
+    let node_exists: bool = conn.query_row(
         "SELECT EXISTS(
             SELECT 1
             FROM nodes
             WHERE id = ?1
-              AND type = 'Function'
         )",
         [trimmed_id],
         |row| row.get(0),
     )?;
 
-    if !function_exists {
-        bail!("function node not found for function_id '{}'", trimmed_id);
+    if !node_exists {
+        bail!("node not found for node_id '{}'", trimmed_id);
     }
 
-    let embedding = embedder(trimmed_summary).context("failed to embed function summary")?;
+    let embedding = embedder(trimmed_summary).context("failed to embed node summary")?;
     if embedding.vector.is_empty() {
         bail!("embedding model returned an empty vector");
     }
@@ -326,13 +321,12 @@ fn add_function_context_with_embedder(
     tx.execute(
         "UPDATE nodes
          SET summary = ?2
-         WHERE id = ?1
-           AND type = 'Function'",
+         WHERE id = ?1",
         params![trimmed_id, trimmed_summary],
     )?;
     tx.execute(
-        "INSERT INTO function_summary_embeddings (
-            function_id,
+        "INSERT INTO node_summary_embeddings (
+            node_id,
             model,
             dimensions,
             summary_hash,
@@ -340,7 +334,7 @@ fn add_function_context_with_embedder(
             updated_at
          )
          VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
-         ON CONFLICT(function_id) DO UPDATE SET
+         ON CONFLICT(node_id) DO UPDATE SET
             model = excluded.model,
             dimensions = excluded.dimensions,
             summary_hash = excluded.summary_hash,
@@ -356,16 +350,16 @@ fn add_function_context_with_embedder(
     )?;
     tx.commit()?;
 
-    Ok(AddFunctionContextResponse {
-        function_id: trimmed_id.to_string(),
+    Ok(AddNodeContextResponse {
+        node_id: trimmed_id.to_string(),
         summary: trimmed_summary.to_string(),
     })
 }
 
-fn ensure_function_summary_embedding_schema(conn: &Connection) -> Result<()> {
+fn ensure_node_summary_embedding_schema(conn: &Connection) -> Result<()> {
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS function_summary_embeddings (
-            function_id TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS node_summary_embeddings (
+            node_id TEXT PRIMARY KEY,
             model TEXT NOT NULL,
             dimensions INTEGER NOT NULL,
             summary_hash TEXT NOT NULL,
@@ -479,16 +473,16 @@ mod tests {
     }
 
     #[test]
-    fn add_function_context_updates_active_function_summary() -> Result<()> {
+    fn add_node_context_updates_function_node_summary() -> Result<()> {
         let db = test_db()?;
-        let response = add_function_context_with_embedder(
+        let response = add_node_context_with_embedder(
             db.path(),
             "function:src/main.rs:build_graph",
             "Builds the durable repository graph used by local tools.",
             fake_embed,
         )?;
 
-        assert_eq!(response.function_id, "function:src/main.rs:build_graph");
+        assert_eq!(response.node_id, "function:src/main.rs:build_graph");
         assert_eq!(
             response.summary,
             "Builds the durable repository graph used by local tools."
@@ -509,10 +503,69 @@ mod tests {
     }
 
     #[test]
-    fn add_function_context_stores_summary_embedding() -> Result<()> {
+    fn add_node_context_updates_file_node_summary() -> Result<()> {
+        let db = test_db()?;
+        let response = add_node_context_with_embedder(
+            db.path(),
+            "file:README.md",
+            "Project overview and operator-facing setup instructions.",
+            fake_embed,
+        )?;
+
+        assert_eq!(response.node_id, "file:README.md");
+        assert_eq!(
+            response.summary,
+            "Project overview and operator-facing setup instructions."
+        );
+
+        let conn = Connection::open(db.path())?;
+        let stored: String = conn.query_row(
+            "SELECT summary FROM nodes WHERE id = ?1",
+            ["file:README.md"],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            stored,
+            "Project overview and operator-facing setup instructions."
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_node_context_stores_node_summary_embedding() -> Result<()> {
         let db = test_db()?;
 
-        add_function_context_with_embedder(
+        add_node_context_with_embedder(
+            db.path(),
+            "file:README.md",
+            "Project overview and operator-facing setup instructions.",
+            fake_embed,
+        )?;
+
+        let conn = Connection::open(db.path())?;
+        let (model, dimensions, summary_hash, embedding): (String, i64, String, Vec<u8>) = conn
+            .query_row(
+                "SELECT model, dimensions, summary_hash, embedding
+                 FROM node_summary_embeddings
+                 WHERE node_id = ?1",
+                ["file:README.md"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+
+        assert_eq!(model, "test-openai-compatible-model");
+        assert_eq!(dimensions, 3);
+        assert!(!summary_hash.is_empty());
+        assert_eq!(decode_embedding_blob(&embedding), vec![0.1, 0.2, 0.3]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn add_node_context_stores_function_summary_embedding() -> Result<()> {
+        let db = test_db()?;
+
+        add_node_context_with_embedder(
             db.path(),
             "function:src/main.rs:build_graph",
             "Builds the durable repository graph used by local tools.",
@@ -523,8 +576,8 @@ mod tests {
         let (model, dimensions, summary_hash, embedding): (String, i64, String, Vec<u8>) = conn
             .query_row(
                 "SELECT model, dimensions, summary_hash, embedding
-                 FROM function_summary_embeddings
-                 WHERE function_id = ?1",
+                 FROM node_summary_embeddings
+                 WHERE node_id = ?1",
                 ["function:src/main.rs:build_graph"],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )?;
@@ -538,10 +591,10 @@ mod tests {
     }
 
     #[test]
-    fn update_function_description_replaces_summary_and_regenerates_embedding() -> Result<()> {
+    fn update_node_description_replaces_summary_and_regenerates_embedding() -> Result<()> {
         let db = test_db()?;
 
-        add_function_context_with_embedder(
+        add_node_context_with_embedder(
             db.path(),
             "function:src/main.rs:build_graph",
             "Old description.",
@@ -551,29 +604,29 @@ mod tests {
         let conn = Connection::open(db.path())?;
         let (old_hash, old_embedding): (String, Vec<u8>) = conn.query_row(
             "SELECT summary_hash, embedding
-             FROM function_summary_embeddings
-             WHERE function_id = ?1",
+             FROM node_summary_embeddings
+             WHERE node_id = ?1",
             ["function:src/main.rs:build_graph"],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         drop(conn);
 
-        let response = update_function_description_with_embedder(
+        let response = update_node_description_with_embedder(
             db.path(),
             "function:src/main.rs:build_graph",
             "New description used for retrieval.",
             fake_embed_from_text,
         )?;
 
-        assert_eq!(response.function_id, "function:src/main.rs:build_graph");
+        assert_eq!(response.node_id, "function:src/main.rs:build_graph");
         assert_eq!(response.description, "New description used for retrieval.");
 
         let conn = Connection::open(db.path())?;
         let (stored_summary, new_hash, new_embedding): (String, String, Vec<u8>) = conn
             .query_row(
-                "SELECT nodes.summary, function_summary_embeddings.summary_hash, function_summary_embeddings.embedding
+                "SELECT nodes.summary, node_summary_embeddings.summary_hash, node_summary_embeddings.embedding
                  FROM nodes
-                 JOIN function_summary_embeddings ON function_summary_embeddings.function_id = nodes.id
+                 JOIN node_summary_embeddings ON node_summary_embeddings.node_id = nodes.id
                  WHERE nodes.id = ?1",
                 ["function:src/main.rs:build_graph"],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -700,22 +753,17 @@ mod tests {
     }
 
     #[test]
-    fn add_function_context_rejects_missing_function() -> Result<()> {
+    fn add_node_context_rejects_missing_node() -> Result<()> {
         let db = test_db()?;
 
-        let missing = add_function_context_with_embedder(
+        let missing = add_node_context_with_embedder(
             db.path(),
             "function:missing",
-            "No such function",
+            "No such node",
             fake_embed,
         );
         assert!(missing.is_err());
-        assert!(
-            missing
-                .unwrap_err()
-                .to_string()
-                .contains("function node not found")
-        );
+        assert!(missing.unwrap_err().to_string().contains("node not found"));
 
         Ok(())
     }
@@ -733,7 +781,7 @@ mod tests {
         );
         assert!(!missing_db.exists());
 
-        let update_error = add_function_context_with_embedder(
+        let update_error = add_node_context_with_embedder(
             &missing_db,
             "function:src/main.rs:build_graph",
             "Build graph.",

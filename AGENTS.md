@@ -112,8 +112,8 @@ When an agent needs to understand repository code, prefer RepoDNA memory before 
 3. Treat results as graph landing points: inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` before deciding what to read next.
 4. Remember that a node can be a `File`, `Directory`, `Function`, `Struct`, `Interface`, `GlobalVariable`, or future code entity.
 5. If a relevant result has a useful non-empty `summary`, use that saved context first.
-6. If a relevant function exists but `summary` is empty, stale, or too generic, inspect the source code yourself.
-7. After understanding the function, call `add_function_context` with the exact `function_id` and a concise high-level summary of what the function is for.
+6. If a relevant node exists but `summary` is empty, stale, or too generic, inspect the source code or docs yourself.
+7. After understanding the node, call `add_node_context` with the exact `node_id` and a concise high-level summary of what the node is for.
 8. If RepoDNA has no relevant result, fall back to normal code search and reading.
 
 This loop is core product behavior: every fresh investigation should improve durable repository memory for the next session.
