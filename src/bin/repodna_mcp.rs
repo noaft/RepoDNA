@@ -40,7 +40,7 @@ struct ContextHealthParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct AddNodeContextParams {
-    /// Exact graph node id returned by search_nodes. This can identify a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity.
+    /// Exact graph node id copied from first_look.recommended_start_nodes[].node_id, context_health.nodes[].node_id, or search_nodes.results[].node_id. Do not invent or reconstruct node ids.
     node_id: String,
     /// Concise high-level description of what this node is for.
     summary: String,
@@ -48,9 +48,9 @@ struct AddNodeContextParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct UpdateNodeDescriptionParams {
-    /// Exact graph node id returned by search_nodes. This can identify a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity.
+    /// Exact graph node id copied from context_health.nodes[].node_id, search_nodes.results[].node_id, or first_look.recommended_start_nodes[].node_id. Do not invent or reconstruct node ids.
     node_id: String,
-    /// Replacement high-level description of what this node is for.
+    /// Replacement durable description written only after reading the current source/docs/diff. Prefer concise, high-level purpose over line-by-line implementation details.
     description: String,
 }
 
@@ -58,6 +58,8 @@ struct UpdateNodeDescriptionParams {
 struct GraphNodeResult {
     /// Durable human/tool-written context attached to this node. It may be empty when no context has been saved yet.
     summary: String,
+    /// Exact graph node id handle for follow-up tools. Copy this value exactly into add_node_context or update_node_description. Do not invent or reconstruct node ids.
+    node_id: String,
     /// Stable graph node id. Use this exact id for follow-up tools and graph traversal.
     id: String,
     /// Node kind, such as File, Directory, Function, Struct, Interface, or GlobalVariable.
@@ -179,7 +181,7 @@ impl ServerHandler for RepoDnaMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             instructions: Some(
-                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. On a new or unfamiliar repository, call first_look before broad filesystem exploration. If it returns bootstrap_needed, read the recommended_start_nodes and then call add_node_context for the nodes you understand.\n2. When returning to a repo or after code changes, call context_health. If it reports stale nodes, treat their summaries as orientation only, read the current source/diff, then call update_node_description with the exact node_id.\n3. Call search_nodes for targeted repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n4. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n5. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n6. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n7. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n8. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
+                "RepoDNA is persistent repository memory for code tools. Before reading files broadly, rebuilding repository context, running wide text search, or opening many files, ask RepoDNA first. Treat this MCP server as the default first stop for recovering what the repository already knows.\n\nMemory-first decision policy:\n1. On a new or unfamiliar repository, call first_look before broad filesystem exploration. If it returns bootstrap_needed, read the recommended_start_nodes and then call add_node_context for the nodes you understand.\n2. When returning to a repo or after code changes, call context_health. If it reports stale nodes, treat their summaries as orientation only, read the current source/diff, then call update_node_description with the exact node_id.\n3. Never invent node ids. Copy node_id exactly from first_look, context_health, or search_nodes results when calling add_node_context or update_node_description.\n4. Call search_nodes for targeted repository discovery. It accepts concrete hints and ordinary search terms: file paths, symbol names, function names, directory names, node types, exact ids, or short natural-language terms.\n5. A node is a graph landing point in RepoDNA. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Search results are not final answers; inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read or query action.\n6. search_nodes uses the same SQLite FTS/BM25 node index as the graph viewer search, so MCP and the viewer should be easy to compare while testing.\n7. Work from the function layer upward: locate the closest relevant node, use saved summary when present, then read source only when memory is missing, stale, or too generic.\n8. If a relevant node summary is missing after you inspect the source or docs, call add_node_context with the exact node_id so the next session does not rediscover it.\n9. If RepoDNA returns no relevant result, fallback to normal filesystem search and source reading.".to_string(),
             ),
             ..Default::default()
         }
@@ -221,7 +223,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Search RepoDNA's graph for code/source nodes using the same SQLite FTS/BM25 index as the graph viewer search. A node is a graph landing point and can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Use this before reading files broadly. Query with partial names, paths, node types, symbols, exact node ids, or short natural-language terms, for example 'build_graph', 'src/api/mod.rs', 'README.md', 'File', 'Directory', 'Function', or 'graph build'. Results are not final answers: inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read/query action."
+        description = "Search RepoDNA's graph for code/source nodes using the same SQLite FTS/BM25 index as the graph viewer search. A node is a graph landing point and can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Use this before reading files broadly. Query with partial names, paths, node types, symbols, exact node ids, or short natural-language terms, for example 'build_graph', 'src/api/mod.rs', 'README.md', 'File', 'Directory', 'Function', or 'graph build'. Results include node_id, a copyable handle for follow-up tools. Do not invent node ids; copy node_id exactly into add_node_context or update_node_description. Results are not final answers: inspect each result's type, name, metadata, summary, bm25_score, and relevance to decide the next read/query action."
     )]
     async fn search_nodes(
         &self,
@@ -233,7 +235,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Add or replace durable context for any RepoDNA graph node. A node can be a File, Directory, Function, Struct, Interface, GlobalVariable, or future code entity. Use this after search_nodes finds a relevant node but its summary is empty, stale, or too generic, and you have inspected enough source/docs to summarize what that node is for. Requires an exact node_id from search_nodes and a concise summary."
+        description = "Add or replace durable context for any RepoDNA graph node. Use this only after reading enough current source/docs to summarize what the node is for. node_id is a copyable handle returned by first_look.recommended_start_nodes[].node_id, context_health.nodes[].node_id, or search_nodes.results[].node_id; copy it exactly and do not invent or reconstruct ids. The summary should be concise, high-level, and durable."
     )]
     async fn add_node_context(
         &self,
@@ -245,7 +247,7 @@ impl RepoDnaMcp {
     }
 
     #[tool(
-        description = "Update the durable description for any existing RepoDNA graph node and regenerate its summary embedding. Use this when a saved node description is stale, incomplete, or wrong. Requires an exact node_id from search_nodes and a replacement description."
+        description = "Update the durable description for an existing RepoDNA graph node and regenerate its summary embedding/source hash. Use this when context_health reports a stale/unknown node, or when search_nodes returns a summary that is wrong, incomplete, or too generic. RepoDNA does not analyze code inside this tool: first read the current source/docs/diff, then write the new high-level description. node_id is a copyable handle returned by context_health.nodes[].node_id, search_nodes.results[].node_id, or first_look.recommended_start_nodes[].node_id; copy it exactly and do not invent or reconstruct ids."
     )]
     async fn update_node_description(
         &self,
@@ -312,9 +314,11 @@ fn search_graph_nodes(db_path: &Path, query: &str, limit: usize) -> Result<Vec<G
     let rows = stmt.query_map(params![fts_query, safe_limit], |row| {
         let bm25_score: f64 = row.get(5)?;
         let relevance = 1.0 / (1.0 + bm25_score.abs());
+        let id: String = row.get(1)?;
         Ok(GraphNodeResult {
             summary: row.get(0)?,
-            id: row.get(1)?,
+            node_id: id.clone(),
+            id,
             r#type: row.get(2)?,
             name: row.get(3)?,
             metadata: row.get(4)?,
@@ -1244,6 +1248,7 @@ mod tests {
 
         for field in [
             "summary",
+            "node_id",
             "id",
             "type",
             "name",
@@ -1296,6 +1301,7 @@ mod tests {
         let file_results = search_graph_nodes(db.path(), "README.md", 20)?;
         assert_eq!(file_results.len(), 1);
         assert_eq!(file_results[0].id, "file:README.md");
+        assert_eq!(file_results[0].node_id, "file:README.md");
         assert_eq!(file_results[0].r#type, "File");
 
         let directory_results = search_graph_nodes(db.path(), "Directory", 20)?;
@@ -1309,6 +1315,18 @@ mod tests {
         assert_eq!(function_results[0].r#type, "Function");
 
         Ok(())
+    }
+
+    #[test]
+    fn search_node_schema_exposes_node_id_as_copyable_handle() {
+        let result_schema = serde_json::to_value(super::schemars::schema_for!(GraphNodeResult))
+            .expect("result schema should serialize");
+        let node_id_description = result_schema["properties"]["node_id"]["description"]
+            .as_str()
+            .expect("node_id field should have a description");
+
+        assert!(node_id_description.contains("Copy this value exactly"));
+        assert!(node_id_description.contains("Do not invent"));
     }
 
     #[test]

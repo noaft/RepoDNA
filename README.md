@@ -203,9 +203,9 @@ Current MCP tools:
 
 - `first_look`: inspect summary coverage and get a bootstrap path for a new or unfamiliar repository. If it returns `bootstrap_needed`, read the recommended nodes first and then call `add_node_context` for the nodes you understand.
 - `context_health`: inspect missing or stale node context after source changes. It compares saved source hashes with current source files, then tells agents which nodes need `add_node_context` or `update_node_description`.
-- `search_nodes`: find graph landing points with the same SQLite FTS/BM25 index used by the graph viewer search. A node can be a file, directory, function, struct, trait/interface, global, or future code entity. Search by partial name, path, node type, symbol, exact node id, or short natural-language terms, then inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` to decide the next read/query action.
+- `search_nodes`: find graph landing points with the same SQLite FTS/BM25 index used by the graph viewer search. A node can be a file, directory, function, struct, trait/interface, global, or future code entity. Search by partial name, path, node type, symbol, exact node id, or short natural-language terms, then inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` to decide the next read/query action. Results include `node_id`, the exact handle to copy into context update tools.
 - `add_node_context`: save durable context for any graph node, including files, directories, functions, structs, interfaces, globals, and future code entities.
-- `update_node_description`: replace stale node context and refresh its embedding.
+- `update_node_description`: replace stale node context and refresh its embedding/source hash after an agent has read current source, docs, or diff. `node_id` must be copied exactly from `first_look`, `context_health`, or `search_nodes`; agents should not invent node ids.
 
 Repo-specific storage is automatic when `REPODNA_DB_PATH` is unset. For example,
 `D:\Git\RepoA` and `D:\Git\RepoB` get separate graph databases under

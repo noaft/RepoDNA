@@ -113,10 +113,12 @@ When an agent needs to understand repository code, prefer RepoDNA memory before 
 4. Call `search_nodes` for targeted repository discovery. It uses the same SQLite FTS/BM25 node index as the graph viewer search and accepts concrete hints or short search terms: node name, type, id, symbol, file path, directory, or source-tree hint.
 5. Treat results as graph landing points: inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` before deciding what to read next.
 6. Remember that a node can be a `File`, `Directory`, `Function`, `Struct`, `Interface`, `GlobalVariable`, or future code entity.
-7. If a relevant result has a useful non-empty `summary`, use that saved context first.
-8. If a relevant node exists but `summary` is empty, stale, or too generic, inspect the source code or docs yourself.
-9. After understanding the node, call `add_node_context` with the exact `node_id` and a concise high-level summary of what the node is for.
-10. If RepoDNA has no relevant result, fall back to normal code search and reading.
+7. Never invent or reconstruct node ids. Copy `node_id` exactly from `first_look`, `context_health`, or `search_nodes` output when calling `add_node_context` or `update_node_description`.
+8. If a relevant result has a useful non-empty `summary`, use that saved context first.
+9. If a relevant node exists but `summary` is empty, stale, or too generic, inspect the source code or docs yourself.
+10. After understanding the node, call `add_node_context` with the exact `node_id` and a concise high-level summary of what the node is for.
+11. Use `update_node_description` only after reading current source/docs/diff. It replaces RepoDNA memory for a node; it does not analyze or edit source code by itself.
+12. If RepoDNA has no relevant result, fall back to normal code search and reading.
 
 This loop is core product behavior: every fresh investigation should improve durable repository memory for the next session.
 
