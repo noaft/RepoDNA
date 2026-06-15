@@ -1,6 +1,7 @@
 use std::env;
 
 mod api;
+mod cli_ux;
 mod embeddings;
 mod history;
 mod ingestion;
@@ -13,11 +14,19 @@ mod settings;
 /// All domain logic for scanning git history lives in the `history` module.
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let parsed = match cli_ux::parse_cli_args(&args) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            eprintln!("Invalid arguments: {err}");
+            std::process::exit(2);
+        }
+    };
 
-    if matches!(args.get(1).map(String::as_str), Some("build"))
-        || matches!(args.get(1).map(String::as_str), Some("ingest-commits"))
-    {
-        let repo_path = args.get(2).map(String::as_str).unwrap_or(".");
+    if matches!(
+        parsed.command_name(),
+        Some("build") | Some("ingest-commits")
+    ) {
+        let repo_path = parsed.repo_path().unwrap_or(".");
 
         match ingestion::build_graph(repo_path) {
             Ok(report) => {
@@ -96,11 +105,8 @@ fn main() {
         return;
     }
 
-    if matches!(args.get(1).map(String::as_str), Some("embed-text")) {
-        let text = args
-            .get(2..)
-            .map(|parts| parts.join(" "))
-            .unwrap_or_default();
+    if matches!(parsed.command_name(), Some("embed-text")) {
+        let text = parsed.command_args().join(" ");
 
         match embeddings::embed_text(&text) {
             Ok(embedding) => {
@@ -120,8 +126,8 @@ fn main() {
         return;
     }
 
-    if matches!(args.get(1).map(String::as_str), Some("update")) {
-        let repo_path = args.get(2).map(String::as_str).unwrap_or(".");
+    if matches!(parsed.command_name(), Some("update")) {
+        let repo_path = parsed.repo_path().unwrap_or(".");
 
         match ingestion::update_graph(repo_path) {
             Ok(report) => {
@@ -200,11 +206,9 @@ fn main() {
         return;
     }
 
-    if matches!(args.get(1).map(String::as_str), Some("viewer"))
-        || matches!(args.get(1).map(String::as_str), Some("serve-graph"))
-    {
-        let repo_path = args.get(2).map(String::as_str).unwrap_or(".");
-        let bind_addr = args.get(3).map(String::as_str).unwrap_or("127.0.0.1:3000");
+    if matches!(parsed.command_name(), Some("viewer") | Some("serve-graph")) {
+        let repo_path = parsed.repo_path().unwrap_or(".");
+        let bind_addr = parsed.command_arg(1).unwrap_or("127.0.0.1:3000");
 
         let repo = match git2::Repository::discover(repo_path) {
             Ok(repo) => repo,
