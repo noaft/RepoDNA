@@ -1,287 +1,175 @@
-# RepoDNA :brain: :dna:
+# RepoDNA
 
-> **Persistent memory for coding tools**
->
-> Stop losing repository context every time the session resets.
+RepoDNA is a local-first memory layer for coding tools.
 
-RepoDNA gives coding tools a long-term memory.
+It builds a SQLite-backed graph from a repository, lets tools search that graph through MCP/API, and stores durable node context so future Codex, Claude, editor, or review sessions do not have to rediscover the same repo knowledge again.
 
-It is built for the tools developers already use: Codex, Claude, editors,
-review agents, and future automation. The goal is shared context, not another
-chat surface.
+RepoDNA is not another assistant. It is the memory substrate underneath assistants.
 
-Most code tools are brilliant inside the current window and forgetful the moment the session ends. They can read files, patch code, and answer local questions, but they repeatedly lose the deeper context:
+## What It Does
 
-- Why does this function exist?
-- Which bug or incident forced this design?
-- What files usually change together?
-- Which author or subsystem owns this area?
-- What did the last agent already discover before the session died?
+- Builds graph nodes for files, directories, Rust functions, structs, traits/interfaces, globals, and future code entities.
+- Adds non-Rust files as file nodes instead of trying to parse them as code.
+- Stores durable summaries on graph nodes with `add_node_context` / `update_node_description`.
+- Preserves saved node context across graph rebuilds.
+- Tracks source hashes for saved context so stale memory can be detected after source changes.
+- Exposes repository memory through a local graph API and an MCP server.
 
-RepoDNA turns the current repository structure and saved tool knowledge into a persistent graph so developers and coding agents can recover context instead of recomputing it from scratch every time.
+## Quick Start
 
-This is context engineering for repositories: build the map once, keep it
-fresh as the code changes, and let every session start from durable memory
-instead of a blank prompt window.
+Build the graph:
 
-## The Story :repeat:
+```powershell
+$env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
+$env:TARGET_REPO="C:\path\to\your-repo"
 
-### The Context Tax
-
-Every coding session starts the same way:
-
-1. The tool reads the current files.
-2. It forms a temporary mental model.
-3. It makes progress.
-4. The session ends.
-5. That mental model disappears.
-
-Then the next session pays the tax again:
-
-- reopen the same files
-- rerun the same searches
-- rederive the same architecture
-- rediscover the same historical constraints
-- reask the same "why is this here?" questions
-
-RepoDNA exists to break that loop.
-
-Instead of letting insight evaporate with the session, RepoDNA stores durable context in a graph:
-
-- code entities such as files, directories, and functions
-- relationships such as contains, calls, main-tree, and main-flow structure
-- metadata such as hotspots and saved function summaries
-
-The result is a memory layer that tools can query quickly through local APIs and MCP.
-
-## What RepoDNA Is :card_index_dividers:
-
-### Not Another Assistant. The Memory Underneath.
-
-RepoDNA is a repository knowledge engine that builds and serves a persistent graph for humans and AI coding tools.
-
-Think of it as:
-
-- a memory cache for code understanding
-- a local knowledge graph for repository context
-- a bridge between the current codebase and agent-friendly retrieval
-
-RepoDNA is not trying to replace your coding assistant.
-
-RepoDNA is the memory system underneath the assistant.
-
-Codex should be able to ask RepoDNA what the repo already knows before it
-spends tokens reading the same files again. Claude should be able to use the
-same graph. A future editor plugin should be able to use it too.
-
-## Why It Matters :zap:
-
-### Better Continuity, Less Rediscovery
-
-Without persistent memory, coding tools are forced to infer everything from the current snapshot. That makes them:
-
-- repetitive
-- fragile across session boundaries
-- weak at preserving architectural intent
-- expensive in tokens and time
-- prone to suggesting changes that ignore historical constraints
-
-With RepoDNA, a tool can ask better questions:
-
-- Show me active functions matching `build_graph`.
-- Which files are hotspots in this subsystem?
-- Which commits introduced this behavior?
-- What other files usually change with this one?
-- Which author has the strongest ownership signal here?
-
-That means less rediscovery and more continuity.
-
-## Core Idea :spider_web:
-
-### Turn Repo Activity Into Durable Context
-
-RepoDNA builds a knowledge graph from two inputs:
-
-1. Repository history
-2. Repository structure
-
-From there it exposes durable context to tools.
-
-```text
-Repository
-   ->
-RepoDNA ingestion
-   ->
-Knowledge graph
-   ->
-MCP / local API / future integrations
-   ->
-Developers and coding agents
+cargo run -- build $env:TARGET_REPO
 ```
 
-## Current Capabilities :hammer_and_wrench:
+Run the MCP server:
 
-### Foundation First
+```powershell
+$env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
+$env:TARGET_REPO="C:\path\to\your-repo"
 
-Today RepoDNA focuses on the foundation layer:
+cargo run --bin repodna_mcp -- $env:TARGET_REPO
+```
 
-- ingest the current repository code into a local SQLite-backed graph
-- extract repository nodes such as files, directories, functions, structs, traits, and globals
-- compute relationships like contains, calls, and main-tree flow
-- calculate ownership and hotspot metadata
-- store durable node context that future sessions can retrieve
-- preserve durable node context across graph rebuilds and flag stale context after source changes
-- expose graph-backed search through local APIs and MCP
+Register with Codex:
 
-This is the groundwork for persistent repository memory.
+```powershell
+codex mcp add repo_dna --env REPODNA_HOME="$env:REPODNA_HOME" -- cargo run --bin repodna_mcp -- $env:TARGET_REPO
+```
 
-## Roadmap :compass:
+Optional: run the graph API:
 
-### From Dogfood To Shared Memory
+```powershell
+$env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
+$env:TARGET_REPO="C:\path\to\your-repo"
 
-The near-term roadmap is intentionally practical:
+cargo run -- serve-graph $env:TARGET_REPO 127.0.0.1:3000
+```
 
-1. **Dogfood Memory Loop** - use RepoDNA while building RepoDNA so each session has less rediscovery than the last.
-2. **Whole Source Graph** - make every file, directory, and code symbol meaningful in one graph.
-3. **MCP As The Product Surface** - let Codex, Claude, and other coding tools consume the same local memory.
-4. **Durable Context Engineering** - let agents save what they learned back onto graph nodes.
-5. **Change-Aware Planning** - combine git diff, graph relationships, hotspots, and saved context before edits.
-6. **Team Memory Layer** - keep local-first workflows while allowing intentional shared memory.
+If you are currently inside another repository and want to run RepoDNA from its source checkout:
 
-See [docs/ROADMAP.md](/abs/path/d:/Git/RepoDNA/docs/ROADMAP.md:1) for the full plan.
+```powershell
+$env:REPODNA_DIR="C:\path\to\RepoDNA"
+$env:TARGET_REPO=(Get-Location).Path
+$env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
 
-## Environment :gear:
+cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- build $env:TARGET_REPO
+cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" --bin repodna_mcp -- $env:TARGET_REPO
+```
 
-### Shared Storage For Shared Memory
+## MCP Workflow
 
-RepoDNA reads optional environment settings from [src/settings.rs](/abs/path/d:/Git/RepoDNA/src/settings.rs:1). A sample file is included at [.env.example](/abs/path/d:/Git/RepoDNA/.env.example:1).
+When an agent enters a repo:
 
-- `REPODNA_HOME`: override the default RepoDNA storage root. RepoDNA creates one graph directory per repository under this root.
-- `REPODNA_DB_PATH`: pin RepoDNA to one fixed SQLite file. Use this only when you intentionally want to manage the database path yourself.
-- `REPODNA_EMBEDDING_PROVIDER`: choose the embedding backend for saved function summaries. Defaults to local `nomic`; set to `openai` for OpenAI-compatible embeddings APIs.
-- `REPODNA_EMBEDDING_MODEL`: choose the embedding model when `REPODNA_EMBEDDING_PROVIDER=openai`. Defaults to `text-embedding-3-small`; the local `nomic` provider always uses `nomic-ai/nomic-embed-text-v1.5`.
-- `OPENAI_API_KEY`: required when `REPODNA_EMBEDDING_PROVIDER=openai`.
-- `OPENAI_BASE_URL`: optional OpenAI-compatible base URL. Defaults to `https://api.openai.com/v1`; use values such as `http://localhost:11434/v1` for local compatible servers.
+```text
+first_look
+-> read recommended nodes
+-> add_node_context for nodes it understands
+```
+
+When an agent needs to find something:
+
+```text
+search_nodes
+-> copy results[].node_id
+-> read source/docs if summary is missing or weak
+-> add_node_context or update_node_description
+```
+
+When source has changed:
+
+```text
+context_health
+-> inspect stale nodes
+-> read current source or diff
+-> update_node_description with the exact node_id
+```
+
+Important: agents should not invent node ids. `node_id` is a handle copied exactly from `first_look`, `context_health`, or `search_nodes`.
+
+## MCP Tools
+
+- `first_look`: gives a bootstrap path for a new or unfamiliar repo.
+- `context_health`: reports missing, stale, deleted, or unknown node context.
+- `search_nodes`: searches graph nodes using the same SQLite FTS/BM25 index as the graph viewer.
+- `add_node_context`: saves durable context for a node after reading source/docs.
+- `update_node_description`: replaces stale or wrong node context after reading current source/docs/diff.
+
+## Storage
+
+Recommended:
+
+```powershell
+$env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
+```
+
+With `REPODNA_HOME`, each repository gets its own graph database under the shared RepoDNA home.
+
+Use `REPODNA_DB_PATH` only when you want to pin RepoDNA to one explicit SQLite file:
+
+```powershell
+$env:REPODNA_DB_PATH="C:\path\to\repo-a\graph.db"
+$env:TARGET_REPO="C:\path\to\repo-a"
+
+cargo run -- build $env:TARGET_REPO
+```
 
 Default storage locations:
 
 - Windows: `%LOCALAPPDATA%\RepoDNA`
 - Unix-like systems: `~/.repodna`
 
-## Getting Started :rocket:
+## Embeddings
 
-### From Repo To Retrieval
+Saved node context is embedded for retrieval. Defaults are local-first.
 
-Build the knowledge graph for a repository:
-
-```powershell
-$env:REPODNA_HOME='D:\RepoDNA\.repodna'
-cargo run -- build D:\Git\RepoDNA
-```
-
-Start the graph API for the same repository:
-
-```powershell
-$env:REPODNA_HOME='D:\RepoDNA\.repodna'
-cargo run -- serve-graph D:\Git\RepoDNA 127.0.0.1:3000
-```
-
-Start the MCP server:
-
-```powershell
-$env:REPODNA_HOME='D:\RepoDNA\.repodna'
-cargo run --bin repodna_mcp -- D:\Git\RepoDNA
-```
-
-Register it with Codex:
-
-```powershell
-codex mcp add repo_dna --env REPODNA_HOME=D:\RepoDNA\.repodna -- cargo run --bin repodna_mcp -- D:\Git\RepoDNA
-```
-
-Current MCP tools:
-
-- `first_look`: inspect summary coverage and get a bootstrap path for a new or unfamiliar repository. If it returns `bootstrap_needed`, read the recommended nodes first and then call `add_node_context` for the nodes you understand.
-- `context_health`: inspect missing or stale node context after source changes. It compares saved source hashes with current source files, then tells agents which nodes need `add_node_context` or `update_node_description`.
-- `search_nodes`: find graph landing points with the same SQLite FTS/BM25 index used by the graph viewer search. A node can be a file, directory, function, struct, trait/interface, global, or future code entity. Search by partial name, path, node type, symbol, exact node id, or short natural-language terms, then inspect `type`, `name`, `metadata`, `summary`, `bm25_score`, and `relevance` to decide the next read/query action. Results include `node_id`, the exact handle to copy into context update tools.
-- `add_node_context`: save durable context for any graph node, including files, directories, functions, structs, interfaces, globals, and future code entities.
-- `update_node_description`: replace stale node context and refresh its embedding/source hash after an agent has read current source, docs, or diff. `node_id` must be copied exactly from `first_look`, `context_health`, or `search_nodes`; agents should not invent node ids.
-
-Repo-specific storage is automatic when `REPODNA_DB_PATH` is unset. For example,
-`D:\Git\RepoA` and `D:\Git\RepoB` get separate graph databases under
-`REPODNA_HOME`, so search results stay scoped to the repository passed to
-`build`, `serve-graph`, or `repodna_mcp`.
-
-Use `REPODNA_DB_PATH` only for an explicit per-repo database path, such as:
-
-```powershell
-$env:REPODNA_DB_PATH='D:\RepoDNA\.repodna\repo-a\graph.db'
-cargo run -- build D:\Git\RepoA
-```
-
-Use an OpenAI-compatible embedding backend when adding node context:
+OpenAI-compatible backend:
 
 ```powershell
 $env:REPODNA_EMBEDDING_PROVIDER='openai'
 $env:REPODNA_EMBEDDING_MODEL='text-embedding-3-small'
 $env:OPENAI_API_KEY='sk-...'
-cargo run --bin repodna_mcp -- D:\Git\RepoDNA
 ```
 
-For a local compatible server, also set:
+Optional local compatible server:
 
 ```powershell
 $env:OPENAI_BASE_URL='http://localhost:11434/v1'
 ```
 
-## What Success Looks Like :dart:
+## Development
 
-### The Return-To-Context Test
+Check the code:
 
-The long-term goal is simple:
+```powershell
+cargo check
+```
 
-When a developer or agent returns to a codebase after minutes, days, or weeks away, they should not have to start from zero.
+Run MCP tests:
 
-They should be able to recover:
+```powershell
+cargo test --bin repodna_mcp
+```
 
-- what exists
-- why it exists
-- what changed
-- who changed it
-- what is risky
-- what the last useful line of investigation already discovered
-- what a previous Codex or Claude session already learned
+Build this repo's graph:
 
-RepoDNA helps turn code understanding from a per-session activity into a persistent asset.
+```powershell
+$env:TARGET_REPO=(Get-Location).Path
+cargo run -- build $env:TARGET_REPO
+```
 
-## Vision :telescope:
+## Product Direction
 
-### Why This Matters Long Term
+RepoDNA is built around one idea:
 
-The broader product direction lives in [docs/VISION.md](/abs/path/d:/Git/RepoDNA/docs/VISION.md:1).
+> Code tools should remember what the repository already knows.
 
-Short version:
+The longer roadmap lives in [docs/VISION.md](docs/VISION.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
-- coding tools need memory, not just reasoning
-- repositories need durable context, not just source snapshots
-- knowledge graphs are a practical substrate for preserving that context
+## License
 
-## Contributing :handshake:
-
-### Build The Memory Layer
-
-Contributions are welcome. If you want to help, start by improving one of these layers:
-
-- ingestion quality
-- graph schema
-- retrieval quality
-- MCP ergonomics
-- developer workflows around persistent repository memory
-
-## License :page_facing_up:
-
-Distributed under the MIT License. See `LICENSE` for more information.
-
-Built for teams who are tired of paying the context tax every session.
-
-> **RepoDNA helps code tools remember what the repo already knows.**
+MIT. See [LICENSE](LICENSE).
