@@ -44,6 +44,10 @@ pub fn ensure_storage_dir(repo: &Repository) -> io::Result<PathBuf> {
 
 fn resolve_repo_storage_dir(repo: &Repository, settings: &Settings) -> PathBuf {
     let repo_root = resolve_repo_root(repo);
+    if !settings.storage_home_from_env {
+        return repo_root.join(".repodna");
+    }
+
     let repo_name = repo_root
         .file_name()
         .and_then(|name| name.to_str())
@@ -51,12 +55,9 @@ fn resolve_repo_storage_dir(repo: &Repository, settings: &Settings) -> PathBuf {
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "repo".to_string());
     let repo_hash = fnv1a_64(repo_root.to_string_lossy().as_bytes());
-
-    resolve_storage_base_dir(settings).join(format!("{}-{:016x}", repo_name, repo_hash))
-}
-
-fn resolve_storage_base_dir(settings: &Settings) -> PathBuf {
-    settings.storage_home.clone()
+    settings
+        .storage_home
+        .join(format!("{}-{:016x}", repo_name, repo_hash))
 }
 
 fn resolve_repo_root(repo: &Repository) -> PathBuf {
@@ -105,4 +106,39 @@ pub fn validate_storage_configuration(repo: &Repository) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use tempfile::TempDir;
+
+    fn init_test_repo() -> (TempDir, Repository) {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let repo = Repository::init(dir.path()).expect("repo should init");
+        (dir, repo)
+    }
+
+    #[test]
+    fn default_storage_dir_lives_inside_repo() {
+        let (dir, repo) = init_test_repo();
+        let settings = Settings::from_pairs([]);
+
+        let storage_dir = resolve_repo_storage_dir(&repo, &settings);
+        let repo_root = fs::canonicalize(dir.path()).expect("repo root should canonicalize");
+
+        assert_eq!(storage_dir, repo_root.join(".repodna"));
+    }
+
+    #[test]
+    fn env_home_storage_keeps_per_repo_directory_under_home() {
+        let (_dir, repo) = init_test_repo();
+        let settings = Settings::from_pairs([("REPODNA_HOME", "C:/RepoDNAHome")]);
+
+        let storage_dir = resolve_repo_storage_dir(&repo, &settings);
+
+        assert!(storage_dir.starts_with(Path::new("C:/RepoDNAHome")));
+        assert_ne!(storage_dir, PathBuf::from("C:/RepoDNAHome"));
+    }
 }

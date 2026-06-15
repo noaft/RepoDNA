@@ -83,7 +83,8 @@ cargo run -- serve-graph D:\Git\RepoDNA 127.0.0.1:3000
 Storage behavior is a core part of the product. Be careful when changing it.
 
 - `REPODNA_DB_PATH` pins RepoDNA to one concrete SQLite file.
-- `REPODNA_HOME` sets the storage root for RepoDNA-managed graph/state files.
+- With no storage env, RepoDNA stores graph/state files inside the target repo at `.repodna/`.
+- `REPODNA_HOME` sets a shared storage root for RepoDNA-managed per-repo graph/state files.
 - `Settings::from_env()` in [src/settings.rs](/abs/path/d:/Git/RepoDNA/src/settings.rs:1) is the canonical place for env-driven settings.
 - Path resolution belongs in [src/repodna_paths.rs](/abs/path/d:/Git/RepoDNA/src/repodna_paths.rs:1), not scattered through the codebase.
 

@@ -29,6 +29,7 @@ pub struct EmbeddingSettings {
 pub struct Settings {
     pub db_path: Option<PathBuf>,
     pub storage_home: PathBuf,
+    pub storage_home_from_env: bool,
     pub embedding: EmbeddingSettings,
 }
 
@@ -37,6 +38,7 @@ impl Default for Settings {
         Self {
             db_path: None,
             storage_home: default_storage_home(),
+            storage_home_from_env: false,
             embedding: EmbeddingSettings::default(),
         }
     }
@@ -66,6 +68,7 @@ impl Settings {
 
         if let Some(path) = lookup_path(&mut lookup, ENV_HOME) {
             settings.storage_home = path;
+            settings.storage_home_from_env = true;
         }
 
         settings.embedding = EmbeddingSettings::from_lookup(lookup);
