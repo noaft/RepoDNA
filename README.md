@@ -17,39 +17,45 @@ RepoDNA is not another assistant. It is the memory substrate underneath assistan
 
 ## Quick Start
 
+Pick the repository you want RepoDNA to remember:
+
+```powershell
+$env:TARGET_REPO="C:\path\to\your-repo"
+```
+
 Build the graph:
 
 ```powershell
-$env:TARGET_REPO="C:\path\to\your-repo"
-
 cargo run -- build $env:TARGET_REPO
 ```
 
-Run the MCP server:
-
-```powershell
-$env:TARGET_REPO="C:\path\to\your-repo"
-
-cargo run --bin repodna_mcp -- $env:TARGET_REPO
-```
-
-Register with Codex:
+Connect RepoDNA MCP to Codex:
 
 ```powershell
 cargo run -- mcp codex add $env:TARGET_REPO
 ```
 
-Run the printed command, or let RepoDNA run it:
+RepoDNA prints the exact `codex mcp add ...` command. Run that command, or let RepoDNA execute it directly:
 
 ```powershell
 cargo run -- mcp codex add $env:TARGET_REPO --execute
 ```
 
+Use a custom MCP server name when you have multiple repos:
+
+```powershell
+cargo run -- mcp codex add $env:TARGET_REPO --name my_repo_memory
+```
+
+Run the MCP server manually only when debugging:
+
+```powershell
+cargo run --bin repodna_mcp -- $env:TARGET_REPO
+```
+
 Optional: run the graph API:
 
 ```powershell
-$env:TARGET_REPO="C:\path\to\your-repo"
-
 cargo run -- serve $env:TARGET_REPO 127.0.0.1:3000
 ```
 
@@ -60,8 +66,15 @@ $env:REPODNA_DIR="C:\path\to\RepoDNA"
 $env:TARGET_REPO=(Get-Location).Path
 
 cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- build $env:TARGET_REPO
-cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" --bin repodna_mcp -- $env:TARGET_REPO
 cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- mcp codex add $env:TARGET_REPO
+```
+
+For direct CLI usage after installing from this checkout:
+
+```powershell
+cargo install --path .
+RepoDNA build $env:TARGET_REPO
+RepoDNA mcp codex add $env:TARGET_REPO --execute
 ```
 
 ## MCP Workflow
@@ -127,10 +140,10 @@ Optional shared storage:
 $env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
 ```
 
-With `REPODNA_HOME`, each repository gets its own graph database under the shared RepoDNA home. If you register MCP with a shared home, pass the same env to the MCP command:
+With `REPODNA_HOME`, each repository gets its own graph database under the shared RepoDNA home. `mcp codex add` automatically includes `REPODNA_HOME` in the Codex registration command when it is set:
 
 ```powershell
-codex mcp add repo_dna --env REPODNA_HOME="$env:REPODNA_HOME" -- cargo run --bin repodna_mcp -- $env:TARGET_REPO
+cargo run -- mcp codex add $env:TARGET_REPO
 ```
 
 Use `REPODNA_DB_PATH` only when you want to pin RepoDNA to one explicit SQLite file:
