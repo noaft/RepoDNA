@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, path::PathBuf, process::Command};
 
 mod api;
 mod cli_ux;
@@ -21,6 +21,50 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    match parsed.parse_codex_mcp_add() {
+        Ok(Some(request)) => {
+            let repo_path = canonicalize_for_command(&request.repo_path);
+            let mcp_program = resolve_mcp_program();
+            let storage_env = storage_env_for_mcp();
+            let command = cli_ux::build_codex_mcp_add_command(
+                &request.server_name,
+                &repo_path,
+                &mcp_program,
+                storage_env,
+            );
+
+            if request.execute {
+                let status = Command::new(&command.program).args(&command.args).status();
+                match status {
+                    Ok(status) if status.success() => {
+                        println!("Codex MCP server '{}' registered.", request.server_name);
+                    }
+                    Ok(status) => {
+                        eprintln!("codex mcp add exited with status: {status}");
+                        std::process::exit(status.code().unwrap_or(1));
+                    }
+                    Err(err) => {
+                        eprintln!("Failed to run codex CLI: {err}");
+                        eprintln!("You can run this command manually:");
+                        eprintln!("{}", command.render());
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                println!("Run this command to register RepoDNA MCP with Codex:");
+                println!("{}", command.render());
+                println!();
+                println!("Add --execute to run it automatically.");
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("Invalid MCP command: {err}");
+            std::process::exit(2);
+        }
+    }
 
     if matches!(
         parsed.command_name(),
@@ -244,4 +288,56 @@ fn main() {
         eprintln!("Failed to scan git history for '{}': {}", repo_path, err);
         std::process::exit(1);
     }
+}
+
+fn canonicalize_for_command(path: &str) -> String {
+    let canonical = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .to_string();
+    strip_windows_verbatim_prefix(&canonical)
+}
+
+fn strip_windows_verbatim_prefix(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+fn resolve_mcp_program() -> String {
+    let Some(current_exe) = env::current_exe().ok() else {
+        return "repodna_mcp".to_string();
+    };
+    let Some(dir) = current_exe.parent() else {
+        return "repodna_mcp".to_string();
+    };
+
+    let candidate = dir.join(format!("repodna_mcp{}", env::consts::EXE_SUFFIX));
+    if candidate.exists() {
+        candidate.to_string_lossy().to_string()
+    } else {
+        "repodna_mcp".to_string()
+    }
+}
+
+fn storage_env_for_mcp() -> Vec<(String, String)> {
+    if let Ok(db_path) = env::var(settings::ENV_DB_PATH) {
+        let trimmed = db_path.trim();
+        if !trimmed.is_empty() {
+            return vec![(settings::ENV_DB_PATH.to_string(), trimmed.to_string())];
+        }
+    }
+
+    if let Ok(home) = env::var(settings::ENV_HOME) {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return vec![(settings::ENV_HOME.to_string(), trimmed.to_string())];
+        }
+    }
+
+    Vec::new()
 }

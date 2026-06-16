@@ -36,7 +36,13 @@ cargo run --bin repodna_mcp -- $env:TARGET_REPO
 Register with Codex:
 
 ```powershell
-codex mcp add repo_dna -- cargo run --bin repodna_mcp -- $env:TARGET_REPO
+cargo run -- mcp codex add $env:TARGET_REPO
+```
+
+Run the printed command, or let RepoDNA run it:
+
+```powershell
+cargo run -- mcp codex add $env:TARGET_REPO --execute
 ```
 
 Optional: run the graph API:
@@ -55,6 +61,7 @@ $env:TARGET_REPO=(Get-Location).Path
 
 cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- build $env:TARGET_REPO
 cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" --bin repodna_mcp -- $env:TARGET_REPO
+cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- mcp codex add $env:TARGET_REPO
 ```
 
 ## MCP Workflow
@@ -94,6 +101,14 @@ Important: agents should not invent node ids. `node_id` is a handle copied exact
 - `search_nodes`: searches graph nodes using the same SQLite FTS/BM25 index as the graph viewer.
 - `add_node_context`: saves durable context for a node after reading source/docs.
 - `update_node_description`: replaces stale or wrong node context after reading current source/docs/diff.
+
+## CLI Helpers
+
+- `mcp codex add <repo>`: prints a Codex MCP registration command for the repo.
+- `mcp codex add <repo> --execute`: runs `codex mcp add` directly.
+- `mcp codex add <repo> --name <server-name>`: uses a custom Codex MCP server name.
+
+If `REPODNA_HOME` or `REPODNA_DB_PATH` is set, RepoDNA includes that env in the Codex registration command. With no storage env, MCP uses the repo-local `.repodna/graph.db`.
 
 ## Storage
 

@@ -4,6 +4,13 @@ pub struct ParsedCli {
     command_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexMcpAddRequest {
+    pub repo_path: String,
+    pub execute: bool,
+    pub server_name: String,
+}
+
 impl ParsedCli {
     pub fn command_name(&self) -> Option<&str> {
         self.command.as_deref()
@@ -19,6 +26,58 @@ impl ParsedCli {
 
     pub fn command_args(&self) -> &[String] {
         &self.command_args
+    }
+
+    pub fn parse_codex_mcp_add(&self) -> Result<Option<CodexMcpAddRequest>, String> {
+        if self.command_name() != Some("mcp") {
+            return Ok(None);
+        }
+
+        if self.command_args.get(0).map(String::as_str) != Some("codex")
+            || self.command_args.get(1).map(String::as_str) != Some("add")
+        {
+            return Err(
+                "expected `repodna mcp codex add <repo> [--execute] [--name <server-name>]`"
+                    .to_string(),
+            );
+        }
+
+        let mut repo_path = None;
+        let mut execute = false;
+        let mut server_name = "repo_dna".to_string();
+        let mut index = 2;
+
+        while let Some(arg) = self.command_args.get(index) {
+            match arg.as_str() {
+                "--execute" => {
+                    execute = true;
+                    index += 1;
+                }
+                "--name" => {
+                    let Some(name) = self.command_args.get(index + 1) else {
+                        return Err("--name requires a server name".to_string());
+                    };
+                    server_name = name.clone();
+                    index += 2;
+                }
+                value if value.starts_with("--") => {
+                    return Err(format!("unknown option `{value}`"));
+                }
+                value => {
+                    if repo_path.is_some() {
+                        return Err("expected only one repository path".to_string());
+                    }
+                    repo_path = Some(value.to_string());
+                    index += 1;
+                }
+            }
+        }
+
+        Ok(Some(CodexMcpAddRequest {
+            repo_path: repo_path.unwrap_or_else(|| ".".to_string()),
+            execute,
+            server_name,
+        }))
     }
 }
 
@@ -47,6 +106,62 @@ fn canonical_command_name(command: &str) -> &str {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexMcpCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl CodexMcpCommand {
+    pub fn render(&self) -> String {
+        let mut parts = vec![quote_shell_arg(&self.program)];
+        parts.extend(self.args.iter().map(|arg| quote_shell_arg(arg)));
+        parts.join(" ")
+    }
+}
+
+pub fn build_codex_mcp_add_command(
+    server_name: &str,
+    repo_path: &str,
+    mcp_program: &str,
+    env: impl IntoIterator<Item = (String, String)>,
+) -> CodexMcpCommand {
+    let mut args = vec![
+        "mcp".to_string(),
+        "add".to_string(),
+        server_name.to_string(),
+    ];
+    let env = env.into_iter().collect::<Vec<_>>();
+
+    for (key, value) in &env {
+        args.push("--env".to_string());
+        args.push(format!("{key}={value}"));
+    }
+
+    args.push("--".to_string());
+    args.push(mcp_program.to_string());
+    args.push(repo_path.to_string());
+
+    CodexMcpCommand {
+        program: "codex".to_string(),
+        args,
+        env,
+    }
+}
+
+fn quote_shell_arg(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '"' | '\'' | '&' | '|' | '<' | '>' | ';'))
+    {
+        format!("\"{}\"", value.replace('"', "\\\""))
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,5 +178,40 @@ mod tests {
         let parsed = parse_cli_args(["repodna", "build", "C:/repo"]).unwrap();
 
         assert_eq!(parsed.repo_path(), Some("C:/repo"));
+    }
+
+    #[test]
+    fn parse_codex_mcp_add_accepts_repo_and_execute_flag() {
+        let parsed = parse_cli_args([
+            "repodna",
+            "mcp",
+            "codex",
+            "add",
+            "C:/Repos/My App",
+            "--execute",
+            "--name",
+            "my_memory",
+        ])
+        .unwrap();
+
+        let request = parsed.parse_codex_mcp_add().unwrap().unwrap();
+
+        assert_eq!(request.repo_path, "C:/Repos/My App");
+        assert_eq!(request.server_name, "my_memory");
+        assert!(request.execute);
+    }
+
+    #[test]
+    fn codex_mcp_command_quotes_repo_path() {
+        let command = build_codex_mcp_add_command(
+            "repo_dna",
+            "C:/Repos/My App",
+            "repodna_mcp",
+            [("REPODNA_HOME".to_string(), "C:/Memory Root".to_string())],
+        );
+        let rendered = command.render();
+
+        assert!(rendered.contains("--env \"REPODNA_HOME=C:/Memory Root\""));
+        assert!(rendered.contains("repodna_mcp \"C:/Repos/My App\""));
     }
 }
