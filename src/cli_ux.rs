@@ -11,6 +11,15 @@ pub struct CodexMcpAddRequest {
     pub server_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupRequest {
+    pub repo_path: String,
+    pub server_name: String,
+    pub force_build: bool,
+    pub no_build: bool,
+    pub print_only: bool,
+}
+
 impl ParsedCli {
     pub fn command_name(&self) -> Option<&str> {
         self.command.as_deref()
@@ -77,6 +86,65 @@ impl ParsedCli {
             repo_path: repo_path.unwrap_or_else(|| ".".to_string()),
             execute,
             server_name,
+        }))
+    }
+
+    pub fn parse_setup(&self) -> Result<Option<SetupRequest>, String> {
+        if self.command_name() != Some("setup") {
+            return Ok(None);
+        }
+
+        let mut repo_path = None;
+        let mut server_name = "repo_dna".to_string();
+        let mut force_build = false;
+        let mut no_build = false;
+        let mut print_only = false;
+        let mut index = 0;
+
+        while let Some(arg) = self.command_args.get(index) {
+            match arg.as_str() {
+                "--name" => {
+                    let Some(name) = self.command_args.get(index + 1) else {
+                        return Err("--name requires a server name".to_string());
+                    };
+                    server_name = name.clone();
+                    index += 2;
+                }
+                "--force-build" => {
+                    force_build = true;
+                    index += 1;
+                }
+                "--no-build" => {
+                    no_build = true;
+                    index += 1;
+                }
+                "--print-only" => {
+                    print_only = true;
+                    index += 1;
+                }
+                value if value.starts_with("--") => {
+                    return Err(format!("unknown option `{value}`"));
+                }
+                value => {
+                    if repo_path.is_some() {
+                        return Err("expected only one repository path".to_string());
+                    }
+                    repo_path = Some(value.to_string());
+                    index += 1;
+                }
+            }
+        }
+
+        if force_build && no_build {
+            return Err("--force-build cannot be used with --no-build".to_string());
+        }
+
+        Ok(Some(SetupRequest {
+            repo_path: repo_path.unwrap_or_else(|| ".".to_string()),
+            server_name,
+            force_build,
+            no_build,
+            print_only,
         }))
     }
 }
@@ -199,6 +267,51 @@ mod tests {
         assert_eq!(request.repo_path, "C:/Repos/My App");
         assert_eq!(request.server_name, "my_memory");
         assert!(request.execute);
+    }
+
+    #[test]
+    fn parse_setup_defaults_to_current_repo_and_repo_dna_name() {
+        let parsed = parse_cli_args(["repodna", "setup"]).unwrap();
+
+        let request = parsed.parse_setup().unwrap().unwrap();
+
+        assert_eq!(request.repo_path, ".");
+        assert_eq!(request.server_name, "repo_dna");
+        assert!(!request.force_build);
+        assert!(!request.no_build);
+        assert!(!request.print_only);
+    }
+
+    #[test]
+    fn parse_setup_accepts_repo_name_and_print_only() {
+        let parsed = parse_cli_args([
+            "repodna",
+            "setup",
+            "C:/Repos/My App",
+            "--name",
+            "my_memory",
+            "--force-build",
+            "--print-only",
+        ])
+        .unwrap();
+
+        let request = parsed.parse_setup().unwrap().unwrap();
+
+        assert_eq!(request.repo_path, "C:/Repos/My App");
+        assert_eq!(request.server_name, "my_memory");
+        assert!(request.force_build);
+        assert!(!request.no_build);
+        assert!(request.print_only);
+    }
+
+    #[test]
+    fn parse_setup_rejects_conflicting_build_flags() {
+        let parsed =
+            parse_cli_args(["repodna", "setup", "C:/repo", "--force-build", "--no-build"]).unwrap();
+
+        let err = parsed.parse_setup().unwrap_err();
+
+        assert!(err.contains("--force-build cannot be used with --no-build"));
     }
 
     #[test]

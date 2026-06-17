@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 mod api;
 mod cli_ux;
@@ -22,10 +26,24 @@ fn main() {
         }
     };
 
+    match parsed.parse_setup() {
+        Ok(Some(request)) => {
+            if let Err(exit_code) = run_setup(request) {
+                std::process::exit(exit_code);
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            eprintln!("Invalid setup command: {err}");
+            std::process::exit(2);
+        }
+    }
+
     match parsed.parse_codex_mcp_add() {
         Ok(Some(request)) => {
             let repo_path = canonicalize_for_command(&request.repo_path);
-            let mcp_program = resolve_mcp_program();
+            let mcp_program = ensure_mcp_program_available();
             let storage_env = storage_env_for_mcp();
             let command = cli_ux::build_codex_mcp_add_command(
                 &request.server_name,
@@ -35,21 +53,8 @@ fn main() {
             );
 
             if request.execute {
-                let status = Command::new(&command.program).args(&command.args).status();
-                match status {
-                    Ok(status) if status.success() => {
-                        println!("Codex MCP server '{}' registered.", request.server_name);
-                    }
-                    Ok(status) => {
-                        eprintln!("codex mcp add exited with status: {status}");
-                        std::process::exit(status.code().unwrap_or(1));
-                    }
-                    Err(err) => {
-                        eprintln!("Failed to run codex CLI: {err}");
-                        eprintln!("You can run this command manually:");
-                        eprintln!("{}", command.render());
-                        std::process::exit(1);
-                    }
+                if let Err(exit_code) = execute_codex_mcp_add(&command, &request.server_name) {
+                    std::process::exit(exit_code);
                 }
             } else {
                 println!("Run this command to register RepoDNA MCP with Codex:");
@@ -290,12 +295,89 @@ fn main() {
     }
 }
 
+fn run_setup(request: cli_ux::SetupRequest) -> Result<(), i32> {
+    let repo_path = canonicalize_for_command(&request.repo_path);
+    let repo = match git2::Repository::discover(&repo_path) {
+        Ok(repo) => repo,
+        Err(err) => {
+            eprintln!("Failed to discover repository '{}': {}", repo_path, err);
+            return Err(1);
+        }
+    };
+
+    let db_path = repodna_paths::resolve_graph_db_path(&repo);
+    let should_build = !request.no_build && (request.force_build || !db_path.exists());
+
+    if should_build {
+        println!("Building RepoDNA graph for {} ...", repo_path);
+        match ingestion::build_graph(&repo_path) {
+            Ok(report) => {
+                println!("Repository graph build completed.");
+                println!("Database: {}", display_path(&report.db_path));
+            }
+            Err(err) => {
+                eprintln!("Failed to build graph for '{}': {}", repo_path, err);
+                return Err(1);
+            }
+        }
+    } else if request.no_build {
+        println!("Skipping graph build (--no-build).");
+        println!("Database: {}", display_path(&db_path));
+    } else {
+        println!("RepoDNA graph already exists.");
+        println!("Database: {}", display_path(&db_path));
+    }
+
+    let mcp_program = ensure_mcp_program_available();
+    let storage_env = storage_env_for_mcp();
+    let command = cli_ux::build_codex_mcp_add_command(
+        &request.server_name,
+        &repo_path,
+        &mcp_program,
+        storage_env,
+    );
+
+    if request.print_only {
+        println!("Run this command to register RepoDNA MCP with Codex:");
+        println!("{}", command.render());
+        return Ok(());
+    }
+
+    execute_codex_mcp_add(&command, &request.server_name)
+}
+
+fn execute_codex_mcp_add(command: &cli_ux::CodexMcpCommand, server_name: &str) -> Result<(), i32> {
+    let status = Command::new(&command.program).args(&command.args).status();
+    match status {
+        Ok(status) if status.success() => {
+            println!("Codex MCP server '{}' registered.", server_name);
+            Ok(())
+        }
+        Ok(status) => {
+            eprintln!("codex mcp add exited with status: {status}");
+            eprintln!("You can run this command manually:");
+            eprintln!("{}", command.render());
+            Err(status.code().unwrap_or(1))
+        }
+        Err(err) => {
+            eprintln!("Failed to run codex CLI: {err}");
+            eprintln!("You can run this command manually:");
+            eprintln!("{}", command.render());
+            Err(1)
+        }
+    }
+}
+
 fn canonicalize_for_command(path: &str) -> String {
     let canonical = std::fs::canonicalize(path)
         .unwrap_or_else(|_| PathBuf::from(path))
         .to_string_lossy()
         .to_string();
     strip_windows_verbatim_prefix(&canonical)
+}
+
+fn display_path(path: &Path) -> String {
+    strip_windows_verbatim_prefix(path.to_string_lossy().as_ref())
 }
 
 fn strip_windows_verbatim_prefix(path: &str) -> String {
@@ -306,6 +388,54 @@ fn strip_windows_verbatim_prefix(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+fn ensure_mcp_program_available() -> String {
+    let existing = resolve_mcp_program();
+    if existing != "repodna_mcp" {
+        return existing;
+    }
+
+    let Some(manifest_path) = find_source_manifest_from_current_exe() else {
+        return existing;
+    };
+
+    let status = Command::new("cargo")
+        .arg("build")
+        .arg("--quiet")
+        .arg("--bin")
+        .arg("repodna_mcp")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .status();
+
+    match status {
+        Ok(status) if status.success() => resolve_mcp_program(),
+        _ => existing,
+    }
+}
+
+fn find_source_manifest_from_current_exe() -> Option<PathBuf> {
+    let current_exe = env::current_exe().ok()?;
+    let mut dir = current_exe.parent()?;
+
+    while let Some(parent) = dir.parent() {
+        let candidate = parent.join("Cargo.toml");
+        if is_repodna_manifest(&candidate) {
+            return Some(candidate);
+        }
+        dir = parent;
+    }
+
+    None
+}
+
+fn is_repodna_manifest(path: &Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+
+    contents.contains("name = \"RepoDNA\"")
 }
 
 fn resolve_mcp_program() -> String {
