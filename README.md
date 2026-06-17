@@ -10,7 +10,7 @@ RepoDNA is not another assistant. It is the memory substrate underneath assistan
 
 - Builds graph nodes for files, directories, Rust functions, structs, traits/interfaces, globals, and future code entities.
 - Adds non-Rust files as file nodes instead of trying to parse them as code.
-- Stores durable summaries on graph nodes with `add_node_context` / `update_node_description`.
+- Stores durable summaries on graph nodes so future sessions can reuse repo knowledge.
 - Preserves saved node context across graph rebuilds.
 - Tracks source hashes for saved context so stale memory can be detected after source changes.
 - Exposes repository memory through a local graph API and an MCP server.
@@ -23,40 +23,47 @@ Pick the repository you want RepoDNA to remember:
 $env:TARGET_REPO="C:\path\to\your-repo"
 ```
 
-Build the graph:
+Build the RepoDNA CLI from this checkout:
 
 ```powershell
-cargo run -- build $env:TARGET_REPO
+cargo install --path .
 ```
 
-Connect RepoDNA MCP to Codex:
+Run the quickstart setup:
 
 ```powershell
-cargo run -- mcp codex add $env:TARGET_REPO
+RepoDNA setup $env:TARGET_REPO
 ```
 
-RepoDNA prints the exact `codex mcp add ...` command. Run that command, or let RepoDNA execute it directly:
+That one command:
+
+- discovers the target repository
+- creates the graph database when it does not exist
+- uses repo-local storage by default at `.repodna/graph.db`
+- registers the RepoDNA MCP server with Codex
+
+Preview what setup will register:
 
 ```powershell
-cargo run -- mcp codex add $env:TARGET_REPO --execute
+RepoDNA setup $env:TARGET_REPO --print-only
+```
+
+Force a rebuild:
+
+```powershell
+RepoDNA setup $env:TARGET_REPO --force-build
 ```
 
 Use a custom MCP server name when you have multiple repos:
 
 ```powershell
-cargo run -- mcp codex add $env:TARGET_REPO --name my_repo_memory
+RepoDNA setup $env:TARGET_REPO --name my_repo_memory
 ```
 
-Run the MCP server manually only when debugging:
+If you do not want to install yet, run the same setup command through Cargo:
 
 ```powershell
-cargo run --bin repodna_mcp -- $env:TARGET_REPO
-```
-
-Optional: run the graph API:
-
-```powershell
-cargo run -- serve $env:TARGET_REPO 127.0.0.1:3000
+cargo run -- setup $env:TARGET_REPO
 ```
 
 If you are currently inside another repository and want to run RepoDNA from its source checkout:
@@ -65,142 +72,22 @@ If you are currently inside another repository and want to run RepoDNA from its 
 $env:REPODNA_DIR="C:\path\to\RepoDNA"
 $env:TARGET_REPO=(Get-Location).Path
 
-cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- build $env:TARGET_REPO
-cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- mcp codex add $env:TARGET_REPO
+cargo run --manifest-path "$env:REPODNA_DIR\Cargo.toml" -- setup $env:TARGET_REPO
 ```
 
-For direct CLI usage after installing from this checkout:
+## Useful Commands
+
+Most users only need `setup`.
 
 ```powershell
-cargo install --path .
-RepoDNA build $env:TARGET_REPO
-RepoDNA mcp codex add $env:TARGET_REPO --execute
+RepoDNA setup $env:TARGET_REPO
 ```
 
-## MCP Workflow
+Useful options:
 
-When an agent enters a repo:
-
-```text
-first_look
--> read recommended nodes
--> add_node_context for nodes it understands
-```
-
-When an agent needs to find something:
-
-```text
-search_nodes
--> copy results[].node_id
--> read source/docs if summary is missing or weak
--> add_node_context or update_node_description
-```
-
-When source has changed:
-
-```text
-context_health
--> inspect stale nodes
--> read current source or diff
--> update_node_description with the exact node_id
-```
-
-Important: agents should not invent node ids. `node_id` is a handle copied exactly from `first_look`, `context_health`, or `search_nodes`.
-
-## MCP Tools
-
-- `first_look`: gives a bootstrap path for a new or unfamiliar repo.
-- `context_health`: reports missing, stale, deleted, or unknown node context.
-- `search_nodes`: searches graph nodes using the same SQLite FTS/BM25 index as the graph viewer.
-- `add_node_context`: saves durable context for a node after reading source/docs.
-- `update_node_description`: replaces stale or wrong node context after reading current source/docs/diff.
-
-## CLI Helpers
-
-- `mcp codex add <repo>`: prints a Codex MCP registration command for the repo.
-- `mcp codex add <repo> --execute`: runs `codex mcp add` directly.
-- `mcp codex add <repo> --name <server-name>`: uses a custom Codex MCP server name.
-
-If `REPODNA_HOME` or `REPODNA_DB_PATH` is set, RepoDNA includes that env in the Codex registration command. With no storage env, MCP uses the repo-local `.repodna/graph.db`.
-
-## Storage
-
-Default behavior:
-
-```text
-<target-repo>/.repodna/graph.db
-<target-repo>/.repodna/state.json
-```
-
-This keeps build, API, and MCP flows pointed at the same local repository memory without requiring environment variables.
-
-Optional shared storage:
-
-```powershell
-$env:REPODNA_HOME="$env:LOCALAPPDATA\RepoDNA"
-```
-
-With `REPODNA_HOME`, each repository gets its own graph database under the shared RepoDNA home. `mcp codex add` automatically includes `REPODNA_HOME` in the Codex registration command when it is set:
-
-```powershell
-cargo run -- mcp codex add $env:TARGET_REPO
-```
-
-Use `REPODNA_DB_PATH` only when you want to pin RepoDNA to one explicit SQLite file:
-
-```powershell
-$env:REPODNA_DB_PATH="C:\path\to\repo-a\graph.db"
-$env:TARGET_REPO="C:\path\to\repo-a"
-
-cargo run -- build $env:TARGET_REPO
-```
-
-## Embeddings
-
-Saved node context is embedded for retrieval. Defaults are local-first.
-
-OpenAI-compatible backend:
-
-```powershell
-$env:REPODNA_EMBEDDING_PROVIDER='openai'
-$env:REPODNA_EMBEDDING_MODEL='text-embedding-3-small'
-$env:OPENAI_API_KEY='sk-...'
-```
-
-Optional local compatible server:
-
-```powershell
-$env:OPENAI_BASE_URL='http://localhost:11434/v1'
-```
-
-## Development
-
-Check the code:
-
-```powershell
-cargo check
-```
-
-Run MCP tests:
-
-```powershell
-cargo test --bin repodna_mcp
-```
-
-Build this repo's graph:
-
-```powershell
-$env:TARGET_REPO=(Get-Location).Path
-cargo run -- build $env:TARGET_REPO
-```
-
-## Product Direction
-
-RepoDNA is built around one idea:
-
-> Code tools should remember what the repository already knows.
-
-The longer roadmap lives in [docs/VISION.md](docs/VISION.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
+- `--print-only`: show the Codex MCP command without running it.
+- `--force-build`: rebuild the repo graph before setup.
+- `--name my_repo_memory`: use a custom MCP server name.
 
 ## License
 
