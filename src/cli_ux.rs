@@ -53,7 +53,7 @@ impl ParsedCli {
 
         let mut repo_path = None;
         let mut execute = false;
-        let mut server_name = "repo_dna".to_string();
+        let mut server_name = "repodna".to_string();
         let mut index = 2;
 
         while let Some(arg) = self.command_args.get(index) {
@@ -95,7 +95,7 @@ impl ParsedCli {
         }
 
         let mut repo_path = None;
-        let mut server_name = "repo_dna".to_string();
+        let mut server_name = "repodna".to_string();
         let mut force_build = false;
         let mut no_build = false;
         let mut print_only = false;
@@ -218,6 +218,33 @@ pub fn build_codex_mcp_add_command(
     }
 }
 
+pub fn build_codex_mcp_add_global_command(
+    server_name: &str,
+    mcp_program: &str,
+    env: impl IntoIterator<Item = (String, String)>,
+) -> CodexMcpCommand {
+    let mut args = vec![
+        "mcp".to_string(),
+        "add".to_string(),
+        server_name.to_string(),
+    ];
+    let env = env.into_iter().collect::<Vec<_>>();
+
+    for (key, value) in &env {
+        args.push("--env".to_string());
+        args.push(format!("{key}={value}"));
+    }
+
+    args.push("--".to_string());
+    args.push(mcp_program.to_string());
+
+    CodexMcpCommand {
+        program: "codex".to_string(),
+        args,
+        env,
+    }
+}
+
 fn quote_shell_arg(value: &str) -> String {
     if value.is_empty()
         || value
@@ -270,13 +297,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_setup_defaults_to_current_repo_and_repo_dna_name() {
+    fn parse_setup_defaults_to_current_repo_and_global_server_name() {
         let parsed = parse_cli_args(["repodna", "setup"]).unwrap();
 
         let request = parsed.parse_setup().unwrap().unwrap();
 
         assert_eq!(request.repo_path, ".");
-        assert_eq!(request.server_name, "repo_dna");
+        assert_eq!(request.server_name, "repodna");
         assert!(!request.force_build);
         assert!(!request.no_build);
         assert!(!request.print_only);
@@ -326,5 +353,15 @@ mod tests {
 
         assert!(rendered.contains("--env \"REPODNA_HOME=C:/Memory Root\""));
         assert!(rendered.contains("repodna_mcp \"C:/Repos/My App\""));
+    }
+
+    #[test]
+    fn global_codex_mcp_command_does_not_pin_repo_path() {
+        let command = build_codex_mcp_add_global_command("repodna", "repodna_mcp", []);
+
+        assert_eq!(
+            command.args,
+            vec!["mcp", "add", "repodna", "--", "repodna_mcp"]
+        );
     }
 }

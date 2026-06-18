@@ -9,6 +9,7 @@ mod cli_ux;
 mod embeddings;
 mod history;
 mod ingestion;
+mod repo_registry;
 mod repodna_paths;
 mod settings;
 
@@ -306,7 +307,8 @@ fn run_setup(request: cli_ux::SetupRequest) -> Result<(), i32> {
     };
 
     let db_path = repodna_paths::resolve_graph_db_path(&repo);
-    let should_build = !request.no_build && (request.force_build || !db_path.exists());
+    let should_build =
+        !request.print_only && !request.no_build && (request.force_build || !db_path.exists());
 
     if should_build {
         println!("Building RepoDNA graph for {} ...", repo_path);
@@ -320,6 +322,9 @@ fn run_setup(request: cli_ux::SetupRequest) -> Result<(), i32> {
                 return Err(1);
             }
         }
+    } else if request.print_only {
+        println!("Preview only; graph build skipped.");
+        println!("Database: {}", display_path(&db_path));
     } else if request.no_build {
         println!("Skipping graph build (--no-build).");
         println!("Database: {}", display_path(&db_path));
@@ -334,17 +339,23 @@ fn run_setup(request: cli_ux::SetupRequest) -> Result<(), i32> {
         ensure_mcp_program_available,
     );
     let storage_env = storage_env_for_mcp();
-    let command = cli_ux::build_codex_mcp_add_command(
-        &request.server_name,
-        &repo_path,
-        &mcp_program,
-        storage_env,
-    );
+    let command =
+        cli_ux::build_codex_mcp_add_global_command(&request.server_name, &mcp_program, storage_env);
 
     if request.print_only {
-        println!("Run this command to register RepoDNA MCP with Codex:");
+        println!("Run this command to register the global RepoDNA MCP server with Codex:");
         println!("{}", command.render());
         return Ok(());
+    }
+
+    match repo_registry::register_repo(&repo) {
+        Ok(entry) => {
+            println!("Repo registered: {}", entry.root);
+        }
+        Err(err) => {
+            eprintln!("Failed to update RepoDNA repo registry: {err}");
+            return Err(1);
+        }
     }
 
     execute_codex_mcp_add(&command, &request.server_name)

@@ -40,7 +40,16 @@ That one command:
 - discovers the target repository
 - creates the graph database when it does not exist
 - uses repo-local storage by default at `.repodna/graph.db`
-- registers the RepoDNA MCP server with Codex
+- registers one global RepoDNA MCP server with Codex
+
+Use RepoDNA with more repositories by running setup once per repo:
+
+```powershell
+RepoDNA setup "C:\path\to\repo-a"
+RepoDNA setup "C:\path\to\repo-b"
+```
+
+Codex still talks to one MCP server named `repodna`. When you work inside a repo, RepoDNA resolves the current git workspace and searches that repo's memory automatically.
 
 Preview what setup will register:
 
@@ -54,7 +63,7 @@ Force a rebuild:
 RepoDNA setup $env:TARGET_REPO --force-build
 ```
 
-Use a custom MCP server name when you have multiple repos:
+Use a custom MCP server name only when you intentionally want a separate server:
 
 ```powershell
 RepoDNA setup $env:TARGET_REPO --name my_repo_memory
@@ -87,7 +96,7 @@ Useful options:
 
 - `--print-only`: show the Codex MCP command without running it.
 - `--force-build`: rebuild the repo graph before setup.
-- `--name my_repo_memory`: use a custom MCP server name.
+- `--name my_repo_memory`: use a custom MCP server name when you do not want the default global `repodna` server.
 
 ## License
 

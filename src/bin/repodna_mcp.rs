@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 #[path = "../embeddings.rs"]
 mod embeddings;
 use git2::Repository;
+#[path = "../repo_registry.rs"]
+mod repo_registry;
 #[path = "../repodna_paths.rs"]
 mod repodna_paths;
 #[path = "../settings.rs"]
@@ -269,23 +271,53 @@ impl RepoDnaMcp {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let repo_path = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| ".".to_string()));
-    let db_path = if let Some(path) = settings::Settings::from_env().db_path {
-        path
-    } else {
-        let repo = Repository::discover(&repo_path).with_context(|| {
-            format!(
-                "failed to discover repository from '{}'",
-                repo_path.display()
-            )
-        })?;
-        repodna_paths::validate_storage_configuration(&repo)?;
-        repodna_paths::resolve_graph_db_path(&repo)
-    };
+    let (repo_path, db_path) = resolve_startup_context(std::env::args().nth(1))?;
 
     let service = RepoDnaMcp::new(db_path, repo_path).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+fn resolve_startup_context(repo_arg: Option<String>) -> Result<(PathBuf, PathBuf)> {
+    let settings = settings::Settings::from_env();
+    let has_explicit_repo_arg = repo_arg.is_some();
+    let repo_path = PathBuf::from(repo_arg.unwrap_or_else(|| ".".to_string()));
+
+    if let Some(path) = settings.db_path {
+        return Ok((repo_path, path));
+    }
+
+    match Repository::discover(&repo_path) {
+        Ok(repo) => {
+            repodna_paths::validate_storage_configuration(&repo)?;
+            let repo_root = repo
+                .workdir()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| repo_path.clone());
+            Ok((repo_root, repodna_paths::resolve_graph_db_path(&repo)))
+        }
+        Err(err) if !has_explicit_repo_arg => resolve_context_from_registry().with_context(|| {
+            format!("failed to discover repository from current directory: {err}")
+        }),
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "failed to discover repository from '{}'",
+                repo_path.display()
+            )
+        }),
+    }
+}
+
+fn resolve_context_from_registry() -> Result<(PathBuf, PathBuf)> {
+    let repos =
+        repo_registry::registered_repos().context("failed to read RepoDNA repo registry")?;
+    match repos.as_slice() {
+        [repo] => Ok((PathBuf::from(&repo.root), PathBuf::from(&repo.db_path))),
+        [] => bail!("RepoDNA has no registered repos yet. Run `RepoDNA setup <repo>` first."),
+        _ => bail!(
+            "RepoDNA could not infer the active repo. Start Codex from a git repo workspace, or run `RepoDNA setup <repo>` for the repo you want to use."
+        ),
+    }
 }
 
 fn search_graph_nodes(db_path: &Path, query: &str, limit: usize) -> Result<Vec<GraphNodeResult>> {
