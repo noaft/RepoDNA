@@ -19,16 +19,20 @@ Every RepoDNA session should start with less rediscovery than the previous one. 
 ### Build
 
 - reliable `build` and `update` flows for the current worktree
+- one-command `RepoDNA setup <repo>` for first-run graph build and Codex registration
+- global MCP server registration through `repodna`
+- repo registry so setup can be repeated across multiple repos without per-repo MCP names
 - full source-tree ingestion: every indexed file becomes a `File` node
 - Rust semantic extraction for functions, structs, traits, globals, calls, main flow
-- saved function context through MCP
+- saved node context through MCP
 - graph API and HTML viewer for manual inspection
 
 ### Success Criteria
 
 - Codex can use RepoDNA memory before broad filesystem search
-- a saved function summary is retrievable in a later session
+- a saved node summary is retrievable in a later session
 - non-Rust files appear as meaningful `File` nodes in the graph
+- running setup for multiple repos still leaves Codex with one `repodna` MCP server
 - `cargo check` remains the baseline verification command
 
 ## Next - Whole Source Graph
@@ -64,20 +68,20 @@ MCP is the first real product surface because it lets Codex, Claude, and other t
 
 ### Build
 
-- keep existing function memory tools stable
-- add graph-wide MCP tools such as:
+- keep existing node memory tools stable:
+  - `first_look`
+  - `context_health`
   - `search_nodes`
-  - `search_files`
-  - `get_node_neighbors`
-  - `get_node_context`
   - `add_node_context`
-- keep MCP startup quiet and resilient on stdio
+- keep global MCP startup quiet and resilient on stdio
+- auto-resolve the active git workspace before falling back to the repo registry
 - keep outputs schema-safe with object root schemas
 
 ### Success Criteria
 
 - a coding agent can ask RepoDNA for context before reading files broadly
 - MCP can retrieve file, directory, and function nodes
+- Codex can use one `repodna` MCP server across multiple repos
 - tool results are small enough to be useful inside model context
 - failures are actionable rather than looking like handshake bugs
 
@@ -135,10 +139,10 @@ RepoDNA should stay local-first, but teams should be able to share memory intent
 
 ### Build
 
-- predictable storage with `REPODNA_HOME` and `REPODNA_DB_PATH`
+- predictable storage with repo-local defaults, `REPODNA_HOME`, and `REPODNA_DB_PATH`
 - export/import of graph memory
 - optional sync strategy
-- repo-scoped memory boundaries
+- repo-scoped memory boundaries and registry-aware routing
 - documentation for Codex, Claude, and local workflows
 
 ### Success Criteria

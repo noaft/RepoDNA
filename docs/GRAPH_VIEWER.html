@@ -408,7 +408,7 @@
       </div>
     </div>
 
-    <p class="status" id="status">Ready. CodeGraph mode ON (Commit/Author hidden). Start API with: cargo run -- serve-graph . 127.0.0.1:3000</p>
+    <p class="status" id="status">Ready. CodeGraph mode ON. Start API with: cargo run -- serve . 127.0.0.1:3000</p>
 
     <section class="board">
       <div class="panel">
@@ -417,7 +417,7 @@
       <aside class="panel side">
         <h2>Selection</h2>
         <div class="legend">
-          <span class="chip">CodeGraph: Commit/Author hidden</span>
+          <span class="chip">CodeGraph source view</span>
           <span class="chip">Directory</span>
           <span class="chip">File</span>
           <span class="chip">Function</span>
@@ -1022,7 +1022,7 @@
     }
 
     function buildModeStatus(prefix) {
-      return `${prefix} CodeGraph mode (Commit/Author hidden); all source file nodes visible; heatmap active for File/Function.`;
+      return `${prefix} CodeGraph mode; all source file nodes visible; heatmap active for File/Function.`;
     }
 
     async function loadNodeInsights(nodeId) {

@@ -144,6 +144,11 @@ The first client surface is MCP because it gives tools like Codex and Claude a
 common way to ask for repository memory without each one needing a bespoke
 integration.
 
+The preferred user experience is one global RepoDNA MCP server. A user can run
+setup once for each repository, then let RepoDNA resolve the active git
+workspace and route requests to the right local graph. Repository memory should
+feel attached to the repo, not to a manually selected MCP server name.
+
 ## North Star Experience
 
 One day, a user should be able to ask:
@@ -224,7 +229,7 @@ The immediate mission is practical:
 1. Build a reliable local graph from repository history and structure.
 2. Persist it in a form tools can reuse across sessions.
 3. Treat every source file and code entity as a meaningful graph node.
-4. Expose that graph through simple retrieval surfaces like MCP.
+4. Expose that graph through simple retrieval surfaces like a global MCP server.
 5. Let tools save useful context back onto graph nodes.
 6. Make context recovery cheaper than context rediscovery.
 
