@@ -328,7 +328,11 @@ fn run_setup(request: cli_ux::SetupRequest) -> Result<(), i32> {
         println!("Database: {}", display_path(&db_path));
     }
 
-    let mcp_program = ensure_mcp_program_available();
+    let mcp_program = select_mcp_program_for_setup(
+        request.print_only,
+        resolve_mcp_program,
+        ensure_mcp_program_available,
+    );
     let storage_env = storage_env_for_mcp();
     let command = cli_ux::build_codex_mcp_add_command(
         &request.server_name,
@@ -355,16 +359,30 @@ fn execute_codex_mcp_add(command: &cli_ux::CodexMcpCommand, server_name: &str) -
         }
         Ok(status) => {
             eprintln!("codex mcp add exited with status: {status}");
+            eprintln!("RepoDNA graph memory is ready, but Codex registration needs attention.");
             eprintln!("You can run this command manually:");
             eprintln!("{}", command.render());
             Err(status.code().unwrap_or(1))
         }
         Err(err) => {
             eprintln!("Failed to run codex CLI: {err}");
+            eprintln!("RepoDNA graph memory is ready, but Codex registration needs attention.");
             eprintln!("You can run this command manually:");
             eprintln!("{}", command.render());
             Err(1)
         }
+    }
+}
+
+fn select_mcp_program_for_setup(
+    print_only: bool,
+    resolve_program: impl FnOnce() -> String,
+    ensure_program: impl FnOnce() -> String,
+) -> String {
+    if print_only {
+        resolve_program()
+    } else {
+        ensure_program()
     }
 }
 
@@ -470,4 +488,55 @@ fn storage_env_for_mcp() -> Vec<(String, String)> {
     }
 
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn setup_print_only_uses_resolver_without_ensuring_mcp_binary() {
+        let resolved_called = Cell::new(false);
+        let ensured_called = Cell::new(false);
+
+        let program = select_mcp_program_for_setup(
+            true,
+            || {
+                resolved_called.set(true);
+                "repodna_mcp".to_string()
+            },
+            || {
+                ensured_called.set(true);
+                "target/debug/repodna_mcp.exe".to_string()
+            },
+        );
+
+        assert_eq!(program, "repodna_mcp");
+        assert!(resolved_called.get());
+        assert!(!ensured_called.get());
+    }
+
+    #[test]
+    fn setup_execute_ensures_mcp_binary_before_registering() {
+        let resolved_called = Cell::new(false);
+        let ensured_called = Cell::new(false);
+
+        let program = select_mcp_program_for_setup(
+            false,
+            || {
+                resolved_called.set(true);
+                "repodna_mcp".to_string()
+            },
+            || {
+                ensured_called.set(true);
+                "target/debug/repodna_mcp.exe".to_string()
+            },
+        );
+
+        assert_eq!(program, "target/debug/repodna_mcp.exe");
+        assert!(!resolved_called.get());
+        assert!(ensured_called.get());
+    }
 }

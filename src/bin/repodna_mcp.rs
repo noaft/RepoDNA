@@ -397,7 +397,7 @@ fn first_look(db_path: &Path, limit: usize) -> Result<FirstLookResponse> {
     };
     let reason = match mode {
         "empty_graph" => {
-            "The graph database has no nodes yet. Run `cargo run -- build <repo>` first."
+            "The graph database has no nodes yet. Run `RepoDNA setup <repo>` first."
         }
         "bootstrap_needed" => {
             "The graph exists, but durable node summaries are sparse. The first agent should read important nodes and save context for future sessions."
@@ -984,7 +984,7 @@ fn decode_embedding_blob(blob: &[u8]) -> Vec<f32> {
 fn open_existing_graph_db(db_path: &Path) -> Result<Connection> {
     if !db_path.exists() {
         bail!(
-            "graph database not found at {}. Run `cargo run -- build <repo>` first with the same repo path. With no storage env, RepoDNA uses <repo>/.repodna/graph.db. If you set REPODNA_HOME or REPODNA_DB_PATH while building, pass the same env to MCP.",
+            "graph database not found at {}. Run `RepoDNA setup <repo>` first with the same repo path. With no storage env, RepoDNA uses <repo>/.repodna/graph.db. If you set REPODNA_HOME or REPODNA_DB_PATH while setting up, pass the same env to MCP.",
             db_path.display()
         );
     }
